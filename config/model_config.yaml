@@ -13,6 +13,19 @@ tactile_encoder:
     hidden_dim: 128        # 隐藏层维度
     output_dim: 256       # 输出维度
     history_length: 30    # 历史时间步数
+    channel_order:
+      - left_Fx
+      - left_Fy
+      - left_Fz
+      - left_Mx
+      - left_My
+      - left_Mz
+      - right_Fx
+      - right_Fy
+      - right_Fz
+      - right_Mx
+      - right_My
+      - right_Mz
 
   # 图像编码器参数 (当 type="image" 时使用)
   image:
@@ -25,6 +38,15 @@ state_encoder:
   input_dim: 6
   hidden_dim: 128
   output_dim: 128
+  normalize_input: true
+  stats_path: "/home/yang/TactileEncoder/dataloader/util/tactile_analysis/state_stats.json"
+  channel_order:
+    - shoulder_pan.pos
+    - shoulder_lift.pos
+    - elbow_flex.pos
+    - wrist_flex.pos
+    - wrist_roll.pos
+    - gripper.pos
 
 # 动作编码器参数
 action_encoder:
@@ -48,7 +70,7 @@ decoder:
 
 # 训练参数
 training:
-  batch_size: 1
+  batch_size: 16
   learning_rate: 1e-4
   weight_decay: 1e-5
   num_epochs: 100
@@ -67,5 +89,8 @@ training:
   tactile_weight_alpha: 2.0
   tactile_weight_slope: 5.0
   tactile_weight_eps: 1e-6
-  tactile_stats_path: "/home/yang/TactileEncoder/dataloader/util/tactile_analysis/tactile_stats.json"
+  tactile_stats_paths:
+    force: "/home/yang/TactileEncoder/dataloader/util/tactile_analysis/tactile_stats.json"
+    image: null  # 提供图像触觉统计文件；若输入已标准化，可使用匹配通道数的零均值/单位方差统计
+  tactile_stats_path: "/home/yang/TactileEncoder/dataloader/util/tactile_analysis/tactile_stats.json"  # 兼容旧配置；仅在 tactile_stats_paths 缺失时回退
   tactile_input_already_normalized: false

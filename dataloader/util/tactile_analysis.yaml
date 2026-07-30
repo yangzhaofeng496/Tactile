@@ -1,0 +1,21 @@
+# Raw dataset feature to analyze.
+feature: observation.tactile.right_force
+
+# Manually map every data channel index to its physical name.
+# The indices must be continuous, complete, and match the actual data dimension.
+channel_mapping:
+  0: Fx
+  1: Fy
+  2: Fz
+  3: Mx
+  4: My
+  5: Mz
+
+# Select one or more names defined in channel_mapping for analysis.
+channels:
+  - Fx
+  - Fy
+  - Fz
+  - Mx
+  - My
+  - Mz

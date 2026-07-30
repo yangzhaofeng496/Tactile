@@ -1,6 +1,8 @@
+import json
+from pathlib import Path
+
 import torch
 import yaml
-from pathlib import Path
 from model import TactileResidualACT
 
 
@@ -28,6 +30,37 @@ def create_model_from_config(config_path):
     encoder_type = config['tactile_encoder']['type']
     action_horizon = int(config['decoder']['action_horizon'])
     action_dim = int(config['decoder']['action_dim'])
+    encoder_config = config['tactile_encoder'][encoder_type]
+    state_config = config['state_encoder']
+    training_config = config['training']
+    stats_path = training_config['tactile_stats_paths'][encoder_type]
+    if not stats_path:
+        raise ValueError(
+            f"No tactile statistics configured for encoder type {encoder_type!r}."
+        )
+    with Path(stats_path).open('r', encoding='utf-8') as file:
+        tactile_stats = json.load(file)
+    channel_names = tactile_stats.get('channel_names')
+    if encoder_type == 'force':
+        expected_order = encoder_config.get('channel_order')
+        if channel_names != expected_order:
+            raise ValueError(
+                "Force channel order mismatch between model config and stats: "
+                f"model={expected_order}, stats={channel_names}."
+            )
+    state_stats_path = state_config.get('stats_path')
+    if not state_stats_path:
+        raise ValueError('state_encoder.stats_path is required.')
+    with Path(state_stats_path).open('r', encoding='utf-8') as file:
+        state_stats = json.load(file)
+    if state_stats.get('channel_names') != state_config.get('channel_order'):
+        raise ValueError(
+            'State channel order mismatch between model config and statistics.'
+        )
+    if int(state_config['input_dim']) != action_dim:
+        raise ValueError(
+            'state_encoder.input_dim must match decoder.action_dim.'
+        )
 
     print(f"创建模型，使用触觉编码器类型: {encoder_type}")
 
@@ -36,8 +69,23 @@ def create_model_from_config(config_path):
         tactile_encoder_type=encoder_type,
         action_horizon=action_horizon,
         action_dim=action_dim,
+        tactile_encoder_cfg=encoder_config,
+        state_encoder_cfg=config.get('state_encoder'),
         action_encoder_cfg=config.get('action_encoder'),
+        fusion_cfg=config.get('fusion'),
         decoder_cfg=config.get('decoder'),
+        tactile_channel_mean=tactile_stats['channel_mean'],
+        tactile_channel_std=tactile_stats['channel_std'],
+        tactile_channel_names=channel_names,
+        normalize_tactile_input=not bool(
+            training_config.get('tactile_input_already_normalized', False)
+        ),
+        state_mean=state_stats['mean'],
+        state_std=state_stats['std'],
+        state_channel_names=state_stats['channel_names'],
+        normalize_state_input=bool(
+            state_config.get('normalize_input', True)
+        ),
     )
 
     return model, config

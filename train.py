@@ -47,6 +47,37 @@ def safe_wandb_finish():
         wandb.finish()
 
 
+def log_compact_wandb_metrics(step, metrics):
+    if wandb.run is None:
+        return
+
+    payload = {
+        "train/weight_loss": float(metrics["weighted_loss"]),
+        "train/unweight_loss": float(metrics["unweighted_loss"]),
+        "train/encoder_rms/action": float(metrics["action_encoder_rms"]),
+        "train/encoder_rms/tactile": float(metrics["tactile_encoder_rms"]),
+        "train/encoder_rms/state": float(metrics["state_encoder_rms"]),
+        "train/modality_contribution/action": float(
+            metrics["action_contribution_ratio"]
+        ),
+        "train/modality_contribution/tactile": float(
+            metrics["tactile_contribution_ratio"]
+        ),
+        "train/modality_contribution/state": float(
+            metrics["state_contribution_ratio"]
+        ),
+    }
+    for action_dim in range(6):
+        payload[f"train/action_dim_mse/axis_{action_dim}"] = float(
+            metrics[f"action_dim{action_dim}_mse"]
+        )
+        payload[f"train/delta_action/axis_{action_dim}"] = float(
+            metrics[f"pred_delta_dim{action_dim}_mean"]
+        )
+
+    wandb.log(payload, step=int(step))
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Train the tactile residual ACT model."
@@ -144,6 +175,12 @@ def init_metric_accumulator():
         "pred_delta_dim3_std_sum": 0.0,
         "pred_delta_dim4_std_sum": 0.0,
         "pred_delta_dim5_std_sum": 0.0,
+        "pred_delta_dim0_mean_sum": 0.0,
+        "pred_delta_dim1_mean_sum": 0.0,
+        "pred_delta_dim2_mean_sum": 0.0,
+        "pred_delta_dim3_mean_sum": 0.0,
+        "pred_delta_dim4_mean_sum": 0.0,
+        "pred_delta_dim5_mean_sum": 0.0,
         "action_dim0_mse_sum": 0.0,
         "action_dim1_mse_sum": 0.0,
         "action_dim2_mse_sum": 0.0,
@@ -192,22 +229,71 @@ def load_tactile_stats(stats_path):
         return json.load(file)
 
 
+def resolve_tactile_stats_path(
+    training_cfg,
+    tactile_type,
+):
+    stats_paths = training_cfg.get("tactile_stats_paths")
+    if stats_paths is not None:
+        if not isinstance(stats_paths, dict):
+            raise ValueError(
+                "training.tactile_stats_paths must be a mapping with "
+                "'force'/'image' keys."
+            )
+        stats_path = stats_paths.get(tactile_type)
+        if stats_path:
+            return stats_path, "typed"
+        raise ValueError(
+            "training.tactile_stats_paths is configured, but "
+            f"training.tactile_stats_paths.{tactile_type} is missing or empty."
+        )
+
+    legacy_path = training_cfg.get("tactile_stats_path")
+    if legacy_path:
+        warnings.warn(
+            "training.tactile_stats_path is deprecated; "
+            "prefer training.tactile_stats_paths.<tactile_type>. "
+            f"Using legacy path for tactile_type={tactile_type!r}.",
+            stacklevel=2,
+        )
+        return legacy_path, "legacy"
+
+    raise ValueError(
+        "Missing tactile stats path. Set "
+        "training.tactile_stats_paths."
+        f"{tactile_type} or legacy training.tactile_stats_path."
+    )
+
+
 def build_tactile_criterion(
     training_cfg,
+    tactile_type,
+    tactile_channels,
     action_horizon,
     action_dim,
 ):
     use_weighted = bool(
         training_cfg.get("use_tactile_weighted_loss", False)
     )
-    stats_path = training_cfg.get("tactile_stats_path")
-    if stats_path is None:
-        raise ValueError(
-            "training.tactile_stats_path is required."
-        )
+    stats_path, stats_path_source = resolve_tactile_stats_path(
+        training_cfg=training_cfg,
+        tactile_type=tactile_type,
+    )
 
     stats_payload = load_tactile_stats(stats_path)
+    stats_channels = len(stats_payload["channel_mean"])
+    if len(stats_payload["channel_std"]) != stats_channels:
+        raise ValueError(
+            f"Tactile stats file {stats_path} has mismatched channel_mean/channel_std lengths."
+        )
+    if stats_channels != tactile_channels:
+        raise ValueError(
+            f"Tactile stats file {stats_path} has {stats_channels} channels, "
+            f"but tactile_type={tactile_type!r} expects {tactile_channels}."
+        )
+
     criterion = TactileMagnitudeWeightedMSE(
+        tactile_type=tactile_type,
         channel_mean=stats_payload["channel_mean"],
         channel_std=stats_payload["channel_std"],
         tau=float(
@@ -237,9 +323,72 @@ def build_tactile_criterion(
     )
     criterion_metadata = {
         "tactile_stats_path": str(stats_path),
+        "tactile_stats_path_source": stats_path_source,
         "stats_payload": stats_payload,
     }
     return criterion, criterion_metadata
+
+
+def validate_force_channel_order(
+    dataloader_config,
+    model_config,
+    stats_payload,
+):
+    data_order = dataloader_config["dataset"]["keys"].get(
+        "tactile_force_channel_order"
+    )
+    model_order = model_config["tactile_encoder"]["force"].get(
+        "channel_order"
+    )
+    stats_order = stats_payload.get("channel_names")
+    orders = {
+        "dataloader tactile_force_channel_order": data_order,
+        "model tactile_encoder.force.channel_order": model_order,
+        "stats channel_names": stats_order,
+    }
+    for source, order in orders.items():
+        if not isinstance(order, list) or not order or any(
+            not isinstance(name, str) or not name for name in order
+        ):
+            raise ValueError(
+                f"{source} must be a non-empty list of channel names."
+            )
+        if len(order) != len(set(order)):
+            raise ValueError(f"{source} contains duplicate channel names.")
+
+    if data_order != model_order or data_order != stats_order:
+        raise ValueError(
+            "Force channel order mismatch. "
+            f"dataloader={data_order}, model={model_order}, stats={stats_order}."
+        )
+    return data_order
+
+
+def load_and_validate_state_stats(model_config, action_dim):
+    state_cfg = model_config["state_encoder"]
+    state_dim = int(state_cfg["input_dim"])
+    if state_dim != action_dim:
+        raise ValueError(
+            "state_encoder.input_dim must match the per-step action dimension: "
+            f"{state_dim} vs {action_dim}."
+        )
+    stats_path = state_cfg.get("stats_path")
+    if not stats_path:
+        raise ValueError("state_encoder.stats_path is required.")
+    stats = load_tactile_stats(stats_path)
+    expected_order = state_cfg.get("channel_order")
+    if stats.get("channel_names") != expected_order:
+        raise ValueError(
+            "State channel order mismatch between model config and statistics: "
+            f"model={expected_order}, stats={stats.get('channel_names')}."
+        )
+    if len(stats.get("mean", [])) != state_dim or len(
+        stats.get("std", [])
+    ) != state_dim:
+        raise ValueError(
+            f"State statistics must contain {state_dim} means and standard deviations."
+        )
+    return stats
 
 
 def summarize_batch_metrics(metrics):
@@ -367,6 +516,7 @@ def compute_batch_diagnostics(
         dim_pred = pred_float[:, :, action_dim]
         diagnostics[f"target_delta_dim{action_dim}_std"] = dim_target.std(unbiased=False)
         diagnostics[f"pred_delta_dim{action_dim}_std"] = dim_pred.std(unbiased=False)
+        diagnostics[f"pred_delta_dim{action_dim}_mean"] = dim_pred.mean()
         diagnostics[f"action_dim{action_dim}_mse"] = (
             (dim_pred - dim_target).square().mean()
         )
@@ -383,48 +533,40 @@ def compute_losses(
     model,
     criterion,
     batch,
-    use_weighted_loss,
 ):
     tactile_history = batch["tactile_history"]
     state = batch["observation.state"]
     act_chunk = batch["act_chunk"]
     expert_action = batch["expert_action"]
 
-    pred_delta = model(
+    pred_delta, feature_metrics = model(
         tactile_history,
         state,
         act_chunk,
+        return_feature_metrics=True,
     )
     target_delta = compute_target_delta(
         expert_action,
         act_chunk,
     )
 
-    if use_weighted_loss:
-        weighted_loss, metrics = criterion(
-            pred_delta=pred_delta,
-            target_delta=target_delta,
-            tactile_history=tactile_history,
-            act_chunk=act_chunk,
-            expert_action=expert_action,
-        )
-    else:
-        unweighted_loss = residual_loss(
-            pred_delta,
-            expert_action,
-            act_chunk,
-        )
-        weighted_loss, metrics = criterion(
-            pred_delta=pred_delta,
-            target_delta=target_delta,
-            tactile_history=tactile_history,
-            act_chunk=act_chunk,
-            expert_action=expert_action,
-        )
-        metrics["weighted_loss"] = weighted_loss.detach()
-        metrics["unweighted_loss"] = unweighted_loss.detach()
+    objective_loss, metrics = criterion(
+        pred_delta=pred_delta,
+        target_delta=target_delta,
+        tactile_history=tactile_history,
+        act_chunk=act_chunk,
+        expert_action=expert_action,
+    )
 
-    return weighted_loss, metrics, pred_delta, target_delta
+    metrics = {
+        **metrics,
+        **{
+            name: value.detach()
+            for name, value in feature_metrics.items()
+        },
+    }
+
+    return objective_loss, metrics, pred_delta, target_delta
 
 
 def train_one_epoch(
@@ -435,9 +577,9 @@ def train_one_epoch(
     criterion,
     device,
     epoch,
-    log_every,
     use_weighted_loss,
     diagnostic_topk,
+    wandb_log_every,
     overfit_single_batch_steps=0,
 ):
     model.train()
@@ -462,14 +604,13 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
 
         with autocast(enabled=device.type == "cuda"):
-            weighted_loss, metrics, pred_delta, target_delta = compute_losses(
+            objective_loss, metrics, pred_delta, target_delta = compute_losses(
                 model=model,
                 criterion=criterion,
                 batch=batch,
-                use_weighted_loss=use_weighted_loss,
             )
 
-        scaler.scale(weighted_loss).backward()
+        scaler.scale(objective_loss).backward()
         grad_norm = compute_grad_norm(model.parameters())
         scaler.step(optimizer)
         scaler.update()
@@ -499,51 +640,21 @@ def train_one_epoch(
 
         pbar.set_postfix(
             {
+                "loss": f"{float(objective_loss.detach().to(torch.float32).item()):.6f}",
                 "weighted": f"{metric_values['weighted_loss']:.6f}",
                 "unweighted": f"{metric_values['unweighted_loss']:.6f}",
                 "w_mean": f"{metric_values['weight_mean']:.3f}",
             }
         )
 
-        if batch_idx % log_every == 0:
-            printable_top = diagnostic_values["top_examples"]
-            print(
-                f"[diag][train][epoch={epoch}][batch={batch_idx}] "
-                f"target_abs_mean={metric_values['target_delta_abs_mean']:.4f} "
-                f"target_abs_max={metric_values['target_delta_abs_max']:.4f} "
-                f"pred_abs_mean={metric_values['pred_delta_abs_mean']:.4f} "
-                f"pred_abs_max={metric_values['pred_delta_abs_max']:.4f} "
-                f"loss_mean={metric_values['loss_per_window_mean']:.4f} "
-                f"loss_max={metric_values['loss_per_window_max']:.4f} "
-                f"act_expert_mse={metric_values['act_expert_mse']:.4f} "
-                f"final_action_mse={metric_values['final_action_mse']:.4f} "
-                f"grad_norm={metric_values['grad_norm']:.4f}"
+        global_batch = (epoch - 1) * len(loader) + batch_idx + 1
+        if global_batch % wandb_log_every == 0:
+            log_compact_wandb_metrics(
+                step=global_batch,
+                metrics=metric_values,
             )
-            print(
-                f"[diag][train][epoch={epoch}][batch={batch_idx}] "
-                f"top_windows={printable_top}"
-            )
-            safe_wandb_log(
-                {
-                    "train/step": epoch * len(loader) + batch_idx,
-                    **format_metrics_for_log(
-                        "train",
-                        metric_values,
-                    ),
-                }
-            )
-
     epoch_metrics = finalize_metric_accumulator(
         metric_accumulator
-    )
-    safe_wandb_log(
-        {
-            "epoch": epoch,
-            **format_metrics_for_log(
-                "train",
-                epoch_metrics,
-            ),
-        }
     )
     return epoch_metrics
 
@@ -576,7 +687,6 @@ def validate(
                     model=model,
                     criterion=criterion,
                     batch=batch,
-                    use_weighted_loss=use_weighted_loss,
                 )
             metric_values = summarize_batch_metrics(metrics)
             diagnostic_values = compute_batch_diagnostics(
@@ -605,31 +715,8 @@ def validate(
                     "unweighted": f"{metric_values['unweighted_loss']:.6f}",
                 }
             )
-            if metric_accumulator["count"] == batch_size:
-                print(
-                    f"[diag][val][epoch={epoch}] "
-                    f"target_abs_mean={metric_values['target_delta_abs_mean']:.4f} "
-                    f"target_abs_max={metric_values['target_delta_abs_max']:.4f} "
-                    f"pred_abs_mean={metric_values['pred_delta_abs_mean']:.4f} "
-                    f"pred_abs_max={metric_values['pred_delta_abs_max']:.4f} "
-                    f"loss_mean={metric_values['loss_per_window_mean']:.4f} "
-                    f"loss_max={metric_values['loss_per_window_max']:.4f} "
-                    f"act_expert_mse={metric_values['act_expert_mse']:.4f} "
-                    f"final_action_mse={metric_values['final_action_mse']:.4f}"
-                )
-                print(
-                    f"[diag][val][epoch={epoch}] "
-                    f"top_windows={diagnostic_values['top_examples']}"
-                )
-
     epoch_metrics = finalize_metric_accumulator(
         metric_accumulator
-    )
-    safe_wandb_log(
-        {
-            "epoch": epoch,
-            **format_metrics_for_log("val", epoch_metrics),
-        }
     )
     return epoch_metrics
 
@@ -754,7 +841,7 @@ def main():
 
     set_seed(int(dataloader_config["split"]["seed"]))
     device = resolve_device(training_cfg)
-    os.environ.setdefault("WANDB_MODE", "offline")
+    os.environ.setdefault("WANDB_MODE", "disable")
     policy_cfg = dataloader_config.get("policy", {})
     if (
         policy_cfg.get("device") == "cuda"
@@ -767,6 +854,13 @@ def main():
         policy_cfg["device"] = "cpu"
 
     tactile_type = dataloader_config["dataset"]["keys"]["tactile_type"]
+    model_tactile_type = model_config["tactile_encoder"]["type"]
+    if model_tactile_type != tactile_type:
+        raise ValueError(
+            "Tactile type mismatch between config/model_config.yaml and "
+            "dataloader/tactile_dataloader.yaml: "
+            f"model={model_tactile_type!r}, dataloader={tactile_type!r}."
+        )
     decoder_cfg = model_config["decoder"]
     model_action_horizon = int(decoder_cfg["action_horizon"])
     model_action_dim = int(decoder_cfg["action_dim"])
@@ -784,17 +878,36 @@ def main():
 
     if tactile_type == "image":
         tactile_history = dataloader_config["sequence"]["tactile_history_image"]
+        tactile_channels = int(
+            model_config["tactile_encoder"]["image"]["in_channels"]
+        )
     elif tactile_type == "force":
         tactile_history = dataloader_config["sequence"]["tactile_history_force"]
+        tactile_channels = int(
+            model_config["tactile_encoder"]["force"]["input_dim"]
+        )
     else:
         raise ValueError(f"未知的 tactile_type: {tactile_type}")
 
     criterion, criterion_metadata = build_tactile_criterion(
         training_cfg=training_cfg,
+        tactile_type=tactile_type,
+        tactile_channels=tactile_channels,
         action_horizon=model_action_horizon,
         action_dim=model_action_dim,
     )
     criterion = criterion.to(device)
+    state_stats = load_and_validate_state_stats(
+        model_config=model_config,
+        action_dim=model_action_dim,
+    )
+    tactile_channel_names = None
+    if tactile_type == "force":
+        tactile_channel_names = validate_force_channel_order(
+            dataloader_config=dataloader_config,
+            model_config=model_config,
+            stats_payload=criterion_metadata["stats_payload"],
+        )
     use_weighted_loss = bool(
         training_cfg.get("use_tactile_weighted_loss", False)
     )
@@ -870,8 +983,21 @@ def main():
         tactile_encoder_type=model_config["tactile_encoder"]["type"],
         action_horizon=model_action_horizon,
         action_dim=model_action_dim,
+        tactile_encoder_cfg=model_config["tactile_encoder"][tactile_type],
+        state_encoder_cfg=model_config.get("state_encoder"),
         action_encoder_cfg=model_config.get("action_encoder"),
+        fusion_cfg=model_config.get("fusion"),
         decoder_cfg=decoder_cfg,
+        tactile_channel_mean=criterion.channel_mean,
+        tactile_channel_std=criterion.channel_std,
+        tactile_channel_names=tactile_channel_names,
+        normalize_tactile_input=not criterion.tactile_input_already_normalized,
+        state_mean=state_stats["mean"],
+        state_std=state_stats["std"],
+        state_channel_names=state_stats["channel_names"],
+        normalize_state_input=bool(
+            model_config["state_encoder"].get("normalize_input", True)
+        ),
     ).to(device)
 
     print(
@@ -906,7 +1032,6 @@ def main():
         )
     print("-" * 60 + "\n")
 
-    safe_wandb_watch(model, log="all", log_freq=100)
     if wandb.run is not None:
         wandb.config.update(
             {
@@ -944,7 +1069,9 @@ def main():
     epochs = int(training_cfg["num_epochs"])
     validate_every = int(training_cfg.get("validate_every", 3))
     checkpoint_every = int(training_cfg.get("checkpoint_every", 10))
-    log_every = int(training_cfg.get("log_every", 10))
+    wandb_log_every = int(training_cfg.get("wandb_log_every", 100))
+    if wandb_log_every < 1:
+        raise ValueError("training.wandb_log_every must be at least 1.")
     diagnostic_topk = int(training_cfg.get("diagnostic_topk", 3))
     overfit_single_batch_steps = int(
         training_cfg.get("overfit_single_batch_steps", 0)
@@ -974,9 +1101,9 @@ def main():
             criterion=criterion,
             device=device,
             epoch=epoch,
-            log_every=log_every,
             use_weighted_loss=use_weighted_loss,
             diagnostic_topk=diagnostic_topk,
+            wandb_log_every=wandb_log_every,
             overfit_single_batch_steps=overfit_single_batch_steps,
         )
 
@@ -1022,13 +1149,6 @@ def main():
                 f"train_weighted={train_metrics['weighted_loss']:.6f} "
                 f"train_unweighted={train_metrics['unweighted_loss']:.6f}"
             )
-
-        safe_wandb_log(
-            {
-                "learning_rate": optimizer.param_groups[0]["lr"],
-                "epoch": epoch,
-            }
-        )
 
         if args.diagnostic_only:
             print("Diagnostic-only run finished after one epoch.")

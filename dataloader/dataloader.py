@@ -28,6 +28,7 @@ class DatasetKeys:
     tactile_force: str | list[str]
     state: str
     expert_action: str
+    tactile_force_channel_order: list[str] | None = None
 
     @property
     def tactile(self) -> str | list[str]:
@@ -878,6 +879,7 @@ def load_lerobot_policy(
             pretrained_revision=revision,
             dataset_stats=dataset.meta.stats,
             dataset_meta=dataset.meta,
+            device=str(device),
         )
     )
 

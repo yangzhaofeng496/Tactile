@@ -22,6 +22,20 @@ dataset:
     tactile_force:
       - "observation.tactile.left_force"
       - "observation.tactile.right_force"
+    # 必须与两个字段的实际拼接顺序、模型配置和统计文件完全一致。
+    tactile_force_channel_order:
+      - left_Fx
+      - left_Fy
+      - left_Fz
+      - left_Mx
+      - left_My
+      - left_Mz
+      - right_Fx
+      - right_Fy
+      - right_Fz
+      - right_Mx
+      - right_My
+      - right_Mz
 
     state: "observation.state"
     expert_action: "action"

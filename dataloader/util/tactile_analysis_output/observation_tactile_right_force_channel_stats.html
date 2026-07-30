@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>observation.tactile.right_force channel statistics (train split)</title>
+  <link rel="stylesheet" href="https://cdn.datatables.net/1.13.8/css/jquery.dataTables.min.css">
+  <style>
+    body {
+      font-family: sans-serif;
+      margin: 24px;
+    }
+    h1 {
+      margin-bottom: 16px;
+      font-size: 20px;
+    }
+  </style>
+</head>
+<body>
+  <h1>observation.tactile.right_force channel statistics (train split)</h1>
+  <table class="dataframe display compact" id="channel-stats">
+  <thead>
+    <tr style="text-align: right;">
+      <th>channel_index</th>
+      <th>channel_name</th>
+      <th>mean</th>
+      <th>std</th>
+      <th>p50</th>
+      <th>p95</th>
+      <th>p99</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>0</td>
+      <td>Fx</td>
+      <td>-2.290024</td>
+      <td>2.950472</td>
+      <td>-0.148923</td>
+      <td>0.031604</td>
+      <td>0.457814</td>
+    </tr>
+    <tr>
+      <td>1</td>
+      <td>Fy</td>
+      <td>-0.417936</td>
+      <td>1.009777</td>
+      <td>-0.063028</td>
+      <td>0.776193</td>
+      <td>1.433033</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td>Fz</td>
+      <td>-14.706253</td>
+      <td>16.888304</td>
+      <td>-1.322125</td>
+      <td>-0.059422</td>
+      <td>0.003044</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td>Mx</td>
+      <td>6.663283</td>
+      <td>8.377959</td>
+      <td>0.549797</td>
+      <td>20.977745</td>
+      <td>26.786989</td>
+    </tr>
+    <tr>
+      <td>4</td>
+      <td>My</td>
+      <td>-0.906267</td>
+      <td>5.181254</td>
+      <td>0.072474</td>
+      <td>5.899378</td>
+      <td>10.576763</td>
+    </tr>
+    <tr>
+      <td>5</td>
+      <td>Mz</td>
+      <td>-1.009550</td>
+      <td>1.662828</td>
+      <td>-0.081926</td>
+      <td>0.230993</td>
+      <td>1.333047</td>
+    </tr>
+  </tbody>
+</table>
+  <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+  <script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
+  <script>
+    new DataTable('#channel-stats', {
+      paging: false,
+      searching: true,
+      info: false,
+      order: [[0, 'asc']]
+    });
+  </script>
+</body>
+</html>
