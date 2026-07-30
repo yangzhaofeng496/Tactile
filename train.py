@@ -523,7 +523,7 @@ def train_one_epoch(
                 f"[diag][train][epoch={epoch}][batch={batch_idx}] "
                 f"top_windows={printable_top}"
             )
-            wandb.log(
+            safe_wandb_log(
                 {
                     "train/step": epoch * len(loader) + batch_idx,
                     **format_metrics_for_log(
@@ -536,7 +536,7 @@ def train_one_epoch(
     epoch_metrics = finalize_metric_accumulator(
         metric_accumulator
     )
-    wandb.log(
+    safe_wandb_log(
         {
             "epoch": epoch,
             **format_metrics_for_log(
@@ -625,7 +625,7 @@ def validate(
     epoch_metrics = finalize_metric_accumulator(
         metric_accumulator
     )
-    wandb.log(
+    safe_wandb_log(
         {
             "epoch": epoch,
             **format_metrics_for_log("val", epoch_metrics),
@@ -755,6 +755,16 @@ def main():
     set_seed(int(dataloader_config["split"]["seed"]))
     device = resolve_device(training_cfg)
     os.environ.setdefault("WANDB_MODE", "offline")
+    policy_cfg = dataloader_config.get("policy", {})
+    if (
+        policy_cfg.get("device") == "cuda"
+        and not torch.cuda.is_available()
+    ):
+        print(
+            "CUDA unavailable in current environment. "
+            "Override dataloader policy.device from cuda to cpu."
+        )
+        policy_cfg["device"] = "cpu"
 
     tactile_type = dataloader_config["dataset"]["keys"]["tactile_type"]
     decoder_cfg = model_config["decoder"]
@@ -789,35 +799,38 @@ def main():
         training_cfg.get("use_tactile_weighted_loss", False)
     )
 
-    wandb.init(
-        project="tactile-residual-act",
-        name=f"train_{dataloader_config['split']['seed']}_{model_config['tactile_encoder']['type']}",
-        config={
-            "epochs": int(training_cfg["num_epochs"]),
-            "batch_size": dataloader_config["loader"]["batch_size"],
-            "learning_rate": float(training_cfg["learning_rate"]),
-            "weight_decay": float(training_cfg["weight_decay"]),
-            "tactile_type": tactile_type,
-            "tactile_history": tactile_history,
-            "action_horizon": model_action_horizon,
-            "action_dim": model_action_dim,
-            "train_ratio": dataloader_config["split"]["train"],
-            "val_ratio": dataloader_config["split"]["val"],
-            "test_ratio": dataloader_config["split"]["test"],
-            "seed": dataloader_config["split"]["seed"],
-            "device": str(device),
-            "tactile_encoder_type": model_config["tactile_encoder"]["type"],
-            "use_tactile_weighted_loss": use_weighted_loss,
-            "tactile_weight_tau": float(criterion.tau.item()),
-            "tactile_weight_alpha": float(criterion.alpha.item()),
-            "tactile_weight_slope": float(criterion.slope.item()),
-            "tactile_weight_eps": float(criterion.eps.item()),
-            "tactile_input_already_normalized": bool(
-                criterion.tactile_input_already_normalized
-            ),
-            "tactile_stats_path": criterion_metadata["tactile_stats_path"],
-        },
-    )
+    try:
+        wandb.init(
+            project="tactile-residual-act",
+            name=f"train_{dataloader_config['split']['seed']}_{model_config['tactile_encoder']['type']}",
+            config={
+                "epochs": int(training_cfg["num_epochs"]),
+                "batch_size": dataloader_config["loader"]["batch_size"],
+                "learning_rate": float(training_cfg["learning_rate"]),
+                "weight_decay": float(training_cfg["weight_decay"]),
+                "tactile_type": tactile_type,
+                "tactile_history": tactile_history,
+                "action_horizon": model_action_horizon,
+                "action_dim": model_action_dim,
+                "train_ratio": dataloader_config["split"]["train"],
+                "val_ratio": dataloader_config["split"]["val"],
+                "test_ratio": dataloader_config["split"]["test"],
+                "seed": dataloader_config["split"]["seed"],
+                "device": str(device),
+                "tactile_encoder_type": model_config["tactile_encoder"]["type"],
+                "use_tactile_weighted_loss": use_weighted_loss,
+                "tactile_weight_tau": float(criterion.tau.item()),
+                "tactile_weight_alpha": float(criterion.alpha.item()),
+                "tactile_weight_slope": float(criterion.slope.item()),
+                "tactile_weight_eps": float(criterion.eps.item()),
+                "tactile_input_already_normalized": bool(
+                    criterion.tactile_input_already_normalized
+                ),
+                "tactile_stats_path": criterion_metadata["tactile_stats_path"],
+            },
+        )
+    except Exception as exc:
+        print(f"wandb disabled due to init failure: {exc}")
 
     print(
         "Tactile weighting input scale: "
@@ -893,13 +906,14 @@ def main():
         )
     print("-" * 60 + "\n")
 
-    wandb.watch(model, log="all", log_freq=100)
-    wandb.config.update(
-        {
-            "total_params": total_params,
-            "trainable_params": trainable_params,
-        }
-    )
+    safe_wandb_watch(model, log="all", log_freq=100)
+    if wandb.run is not None:
+        wandb.config.update(
+            {
+                "total_params": total_params,
+                "trainable_params": trainable_params,
+            }
+        )
 
     optimizer = AdamW(
         model.parameters(),
@@ -1009,7 +1023,7 @@ def main():
                 f"train_unweighted={train_metrics['unweighted_loss']:.6f}"
             )
 
-        wandb.log(
+        safe_wandb_log(
             {
                 "learning_rate": optimizer.param_groups[0]["lr"],
                 "epoch": epoch,
@@ -1036,7 +1050,7 @@ def main():
                 criterion=criterion,
                 config_snapshot=config_snapshot,
             )
-            wandb.save(str(best_checkpoint_path))
+            safe_wandb_save(best_checkpoint_path)
             print(
                 "  → 保存最佳模型 "
                 f"{best_checkpoint_path} "
@@ -1059,9 +1073,9 @@ def main():
                 criterion=criterion,
                 config_snapshot=config_snapshot,
             )
-            wandb.save(str(checkpoint_path))
+            safe_wandb_save(checkpoint_path)
 
-    wandb.finish()
+    safe_wandb_finish()
     print(f"\n训练完成！最佳验证损失: {best_val_loss:.6f}")
 
 
