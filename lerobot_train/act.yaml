@@ -1,0 +1,48 @@
+dataset:
+  repo_id: yangzhaofeng/guangmokuai/so101/dm_200
+  root: /home/yang/TactileEncoder/dataset/so101/dm_200
+  video_backend: pyav
+
+policy:
+  type: act
+  push_to_hub: false
+  chunk_size: 100
+  n_action_steps: 100
+  n_obs_steps: 1
+  input_features:
+    observation.images.top:
+      type: VISUAL
+      shape: [3, 480, 640]
+    observation.images.wrist_cam:
+      type: VISUAL
+      shape: [3, 480, 640]
+    observation.images.side:
+      type: VISUAL
+      shape: [3, 480, 640]
+    # observation.images.left_dm_distforce:
+    #   type: VISUAL
+    #   shape: [3, 288, 384]
+    # observation.images.right_dm_distforce:
+    #   type: VISUAL
+    #   shape: [3, 288, 384]
+    observation.state:
+      type: STATE
+      shape: [6]
+  output_features:
+    action:
+      type: ACTION
+      shape: [6]
+
+steps: 100000
+batch_size: 8
+num_workers: 4
+log_freq: 100
+save_freq: 10000
+save_checkpoint: true
+seed: 42
+output_dir: outputs/train
+
+optimizer:
+  lr: 1.0e-5
+  weight_decay: 1.0e-4
+  grad_clip_norm: 10.0

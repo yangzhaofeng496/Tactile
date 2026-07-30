@@ -1,0 +1,85 @@
+dataset:
+  repo_id: "/home/yang/TactileEncoder/dataset/so101/dm_350"
+
+  # 从 Hub 加载时设为 null。
+  # 本地加载时填写 LeRobot 数据集根目录。
+  root: null
+  revision: null
+
+  # 当前环境下 torchcodec 依赖不完整时，改用 pyav 解码视频。
+  video_backend: "torchcodec"
+
+  keys:
+    # 触觉数据类型: "image" 或 "force"
+    tactile_type: "force"  # 切换为 "image" 以使用图像数据
+
+    # 图像触觉键 (当 tactile_type="image" 时使用)
+    tactile_image:
+      - "observation.images.left_dm_distforce"
+      - "observation.images.right_dm_distforce"
+
+    # 合力触觉键 (当 tactile_type="force" 时使用)
+    tactile_force:
+      - "observation.tactile.left_force"
+      - "observation.tactile.right_force"
+
+    state: "observation.state"
+    expert_action: "action"
+
+  # ACT原始训练时使用的观测字段。
+  # 当前ACT checkpoint训练时使用了触觉输入。
+  act_observation_keys:
+    - "observation.state"
+    - "observation.images.top"
+    - "observation.images.wrist_cam"
+    - "observation.images.side"
+    - "observation.images.left_dm_distforce"
+    - "observation.images.right_dm_distforce"
+
+sequence:
+  # 输入触觉专家的历史触觉帧数，包含当前帧。
+  # 当 tactile_type="image" 时使用
+  tactile_history_image: 10
+
+  # 当 tactile_type="force" 时使用
+  tactile_history_force: 30
+
+  # 从数据集中读取的未来专家动作长度。
+  # ACT输出完整chunk后，只截取前面这些动作。
+  action_horizon: 30
+
+policy:
+  # 用于检查加载的checkpoint是不是对应策略。
+  type: "act"
+
+  # 可以是Hugging Face模型ID，也可以是本地checkpoint目录。
+  #
+  # LeRobot训练结果通常填写：
+  # outputs/train/xxx/checkpoints/last/pretrained_model
+  pretrained_path: "/home/yang/TactileEncoder/actmodel/act_350/so101/ACT_orin/reinforce/dm_act_orin_350_reinforce/checkpoints/100000"
+
+  revision: null
+
+  # cuda、cpu或mps。
+  device: "cuda"
+
+  # 将ACT输出经过checkpoint自带postprocessor，
+  # 还原到与数据集action相同的动作数值空间。
+  use_postprocessor: true
+
+split:
+  train: 0.70
+  val: 0.15
+  test: 0.15
+  seed: 42
+
+loader:
+  batch_size: 16
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  shuffle_train: true
+  drop_last_train: false
+
+test:
+  num_batches: 2

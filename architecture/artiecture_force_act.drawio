@@ -1,0 +1,124 @@
+<mxfile host="65bd71144e">
+    <diagram name="TactileResidualACT Architecture" id="architecture">
+        <mxGraphModel dx="1346" dy="856" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2400" pageHeight="1200" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="title" value="TactileResidualACT (Force): ACT Baseline + Tactile Residual Correction" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=24;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="500" y="20" width="1200" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="image_input" value="RGB Images&lt;br&gt;top / wrist / side&lt;br&gt;[B, C, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="480" y="150" width="220" height="90" as="geometry"/>
+                </mxCell>
+                <mxCell id="state_input_top" value="Robot State&lt;br&gt;[B, 6]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="480" y="280" width="220" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="tactile_input" value="Tactile Force History&lt;br&gt;left + right&lt;br&gt;[B, 16, 12]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="470" y="520" width="220" height="90" as="geometry"/>
+                </mxCell>
+                <mxCell id="state_input_bottom" value="Robot State&lt;br&gt;[B, 6]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="480" y="660" width="220" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="act_module" value="Frozen ACT Module" style="swimlane;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14;fontStyle=1;startSize=36;" parent="1" vertex="1">
+                    <mxGeometry x="770" y="140" width="340" height="230" as="geometry"/>
+                </mxCell>
+                <mxCell id="act_obs" value="Inputs: image observations + current state" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12" parent="act_module" vertex="1">
+                    <mxGeometry x="20" y="45" width="300" height="45" as="geometry"/>
+                </mxCell>
+                <mxCell id="act_decode" value="Predict action chunk" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12" parent="act_module" vertex="1">
+                    <mxGeometry x="20" y="105" width="300" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="act_output" value="Baseline Action a_act&lt;br&gt;[B, 5, 6]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;fontStyle=1" parent="act_module" vertex="1">
+                    <mxGeometry x="20" y="160" width="300" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="residual_module" value="TactileResidualACT" style="swimlane;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=14;fontStyle=1;startSize=36;" parent="1" vertex="1">
+                    <mxGeometry x="770" y="460" width="520" height="330" as="geometry"/>
+                </mxCell>
+                <mxCell id="force_encoder" value="TactileForceEncoder&lt;br&gt;history force -&gt; tactile feature [B, 256]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12" parent="residual_module" vertex="1">
+                    <mxGeometry x="20" y="45" width="480" height="45" as="geometry"/>
+                </mxCell>
+                <mxCell id="state_encoder" value="StateEncoder&lt;br&gt;state -&gt; state feature [B, 128]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12" parent="residual_module" vertex="1">
+                    <mxGeometry x="20" y="100" width="480" height="45" as="geometry"/>
+                </mxCell>
+                <mxCell id="action_encoder" value="ActionEncoder&lt;br&gt;baseline action a_act -&gt; action feature [B, 256]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12" parent="residual_module" vertex="1">
+                    <mxGeometry x="20" y="155" width="480" height="45" as="geometry"/>
+                </mxCell>
+                <mxCell id="fusion_block" value="FusionEncoder&lt;br&gt;concat [256 + 128 + 256] -&gt; fused latent z [B, 256]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1" parent="residual_module" vertex="1">
+                    <mxGeometry x="20" y="210" width="480" height="45" as="geometry"/>
+                </mxCell>
+                <mxCell id="delta_output" value="ResidualDecoder -&gt; Delta Action Δa&lt;br&gt;[B, 5, 6]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=13;fontStyle=1" parent="residual_module" vertex="1">
+                    <mxGeometry x="20" y="265" width="480" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="compose_box" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;dashed=1;" parent="1" vertex="1">
+                    <mxGeometry x="1380" y="350" width="500" height="200" as="geometry"/>
+                </mxCell>
+                <mxCell id="3" style="edgeStyle=orthogonalEdgeStyle;html=1;entryX=0.5;entryY=0;entryDx=0;entryDy=0;entryPerimeter=0;" edge="1" parent="1" source="baseline_copy" target="5">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="baseline_copy" value="Baseline Action&lt;br&gt;a_act [B, 5, 6]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;rotation=0;" parent="1" vertex="1">
+                    <mxGeometry x="1410" y="370" width="130" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="delta_copy" value="Delta Action&lt;br&gt;&amp;nbsp;Δa [B, 5, 6]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;rotation=0;" parent="1" vertex="1">
+                    <mxGeometry x="1410" y="470" width="130" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="final_action" value="Final Action a = a_act + Δa&lt;br&gt;[B, 5, 6]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="1630" y="415" width="240" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#6c8ebf;" parent="1" source="image_input" target="act_module" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#82b366;" parent="1" source="state_input_top" target="act_module" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#9673a6;exitX=1;exitY=0.5;exitDx=0;exitDy=0;" parent="1" source="tactile_input" target="residual_module" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="730" y="565"/>
+                            <mxPoint x="730" y="625"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#82b366;exitX=1;exitY=0.5;exitDx=0;exitDy=0;" parent="1" source="state_input_bottom" target="residual_module" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="730" y="695"/>
+                            <mxPoint x="730" y="625"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e5" value="&lt;font style=&quot;font-size: 14px;&quot;&gt;a_act&lt;/font&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#b85450;fontSize=12;fontStyle=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" parent="1" source="act_module" target="residual_module" edge="1">
+                    <mxGeometry x="-0.9355" y="15" relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="1180" y="255"/>
+                            <mxPoint x="1180" y="410"/>
+                            <mxPoint x="730" y="410"/>
+                            <mxPoint x="730" y="625"/>
+                        </Array>
+                        <mxPoint x="1" as="offset"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#b85450;" parent="1" source="act_module" target="baseline_copy" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="1180" y="255"/>
+                            <mxPoint x="1180" y="330"/>
+                            <mxPoint x="1475" y="330"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="8" style="edgeStyle=orthogonalEdgeStyle;html=1;" edge="1" parent="1" source="5" target="final_action">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="5" value="" style="verticalLabelPosition=bottom;verticalAlign=top;html=1;shape=mxgraph.flowchart.summing_function;" vertex="1" parent="1">
+                    <mxGeometry x="1555" y="430" width="30" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="7" style="edgeStyle=orthogonalEdgeStyle;html=1;entryX=0.5;entryY=1;entryDx=0;entryDy=0;entryPerimeter=0;" edge="1" parent="1" source="delta_copy" target="5">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="11" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=light-dark(#ffe6cc, #d7817e);strokeWidth=2;align=center;verticalAlign=middle;fontFamily=Helvetica;fontSize=11;fontColor=default;labelBackgroundColor=default;endArrow=classic;" edge="1" parent="1" source="residual_module" target="delta_copy">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>
