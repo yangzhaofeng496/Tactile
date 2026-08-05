@@ -1,0 +1,107 @@
+# Temporal VQ-VAE for tactile force history encoding
+
+model:
+  # 输入维度配置
+  input:
+    history_steps: 15          # 历史步数 T
+    force_dim: 12              # 力的维度（12维：左右各6个传感器）
+
+  # 编码器配置
+  encoder:
+    conv1_in: 12               # 第一层卷积输入通道（对应force_dim）
+    conv1_out: 64              # 第一层卷积输出通道
+    conv1_kernel: 3            # 第一层卷积核大小
+
+    conv2_in: 64               # 第二层卷积输入通道
+    conv2_out: 128             # 第二层卷积输出通道
+    conv2_kernel: 3            # 第二层卷积核大小
+
+    fc_out: 256                # 全连接层输出维度（embedding dim）
+
+  # Vector Quantizer 配置
+  quantizer:
+    num_embeddings: 16         # codebook大小（离散token数量）
+    embedding_dim: 256         # embedding维度
+    commitment_cost: 500.0     # commitment loss的权重 beta
+    ema_decay: 0.9             # EMA decay rate
+    ema_epsilon: 0.00001       # EMA numerical stability constant
+
+  # 解码器配置
+  decoder:
+    fc1_in: 256                # 第一层全连接输入维度
+    fc1_out: 128               # 第一层全连接输出维度
+    fc2_out: 180               # 第二层全连接输出维度（history_steps * force_dim = 15*12）
+
+loss:
+  # 重建损失权重
+  reconstruction_weight: 1.0
+
+  # codebook损失权重
+  codebook_weight: 1.0
+
+  # commitment损失权重（在模型内部使用commitment_cost）
+  commitment_weight: 1.0
+
+training:
+  # batch size
+  batch_size: 32
+
+  # AdamW 学习率
+  learning_rate: 0.00003
+
+  # AdamW 权重衰减
+  weight_decay: 0.00001
+
+  # 训练轮数
+  num_epochs: 50
+
+  # DataLoader worker 数
+  num_workers: 0
+
+  # 训练设备
+  device: cuda
+
+  # 每多少个 step 打印一次训练日志
+  log_every: 10
+
+  # 每多少个 batch 上传一次 wandb 数据
+  wandb_log_every: 10
+
+  # checkpoint 保存目录
+  save_dir: TactileSelfencoder/vqvae_checkpoints
+
+  # 每多少个epoch保存一次checkpoint
+  save_every: 5
+
+  # gradient clipping (防止梯度爆炸)
+  grad_clip_norm: 1.0
+
+wandb:
+  # 是否启用 wandb
+  enabled: true
+
+  # wandb project 名称
+  project: tactile-vqvae
+
+  # run 名称；为空时自动生成
+  run_name: ""
+
+data:
+  # 数据来源：使用与主训练脚本相同的dataloader
+  dataloader_config: dataloader/tactile_dataloader.yaml
+
+  # 使用的数据划分
+  split:
+    train: 0.70
+    val: 0.15
+    test: 0.15
+    seed: 42
+
+# Dead code replacement configuration
+dead_code_replacement:
+  enabled: true              # Toggle on/off
+  usage_decay: 0.99          # EMA decay for usage tracking (slower than codebook EMA)
+  dead_threshold: 1.0        # Below this = dead code
+  dead_patience: 1000        # Steps before marking as dead
+  check_interval: 100        # Check every N steps
+  reset_interval: 500        # Reset dead codes every N steps
