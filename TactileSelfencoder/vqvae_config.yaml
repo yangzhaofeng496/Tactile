@@ -53,10 +53,10 @@ training:
   weight_decay: 0.00001
 
   # 训练轮数
-  num_epochs: 50
+  num_epochs: 100
 
   # DataLoader worker 数
-  num_workers: 0
+  num_workers: 8
 
   # 训练设备
   device: cuda
@@ -68,13 +68,17 @@ training:
   wandb_log_every: 10
 
   # checkpoint 保存目录
-  save_dir: TactileSelfencoder/vqvae_checkpoints
+  save_dir: TactileSelfencoder/vqvae_checkpoints/50_16tokens_resume
 
   # 每多少个epoch保存一次checkpoint
   save_every: 5
 
   # gradient clipping (防止梯度爆炸)
   grad_clip_norm: 1.0
+
+  # 聚类可视化设置
+  clustering_viz_interval: 100  # 每100个batch生成一次聚类可视化
+  clustering_viz_max_samples: 1000  # 每次可视化最多使用1000个样本
 
 wandb:
   # 是否启用 wandb
@@ -92,16 +96,16 @@ data:
 
   # 使用的数据划分
   split:
-    train: 0.70
-    val: 0.15
-    test: 0.15
+    train: 0.80
+    val: 0.1
+    test: 0.1
     seed: 42
 
 # Dead code replacement configuration
-dead_code_replacement:
+dead_code_replacement: 
   enabled: true              # Toggle on/off
-  usage_decay: 0.99          # EMA decay for usage tracking (slower than codebook EMA)
+  usage_decay: 0.90          # EMA decay for usage tracking (slower than codebook EMA)
   dead_threshold: 1.0        # Below this = dead code
-  dead_patience: 1000        # Steps before marking as dead
-  check_interval: 100        # Check every N steps
-  reset_interval: 500        # Reset dead codes every N steps
+  dead_patience:  100        # Steps before marking as dead
+  check_interval: 246        # Check every N steps
+  reset_interval: 369        # Reset dead codes every N steps

@@ -533,11 +533,21 @@ def compute_losses(
     model,
     criterion,
     batch,
+    reference_dropout=0.5,
 ):
     tactile_history = batch["tactile_history"]
     state = batch["observation.state"]
     act_chunk = batch["act_chunk"]
     expert_action = batch["expert_action"]
+
+    # 数据增强：以reference_dropout概率分别独立地将state和action置零
+    if model.training and reference_dropout > 0:
+        # state以reference_dropout概率置零
+        if torch.rand(1).item() < reference_dropout:
+            state = torch.zeros_like(state)
+        # action以reference_dropout概率置零
+        if torch.rand(1).item() < reference_dropout:
+            act_chunk = torch.zeros_like(act_chunk)
 
     pred_delta, feature_metrics = model(
         tactile_history,
@@ -581,6 +591,7 @@ def train_one_epoch(
     diagnostic_topk,
     wandb_log_every,
     overfit_single_batch_steps=0,
+    reference_dropout=0.5,
 ):
     model.train()
     metric_accumulator = init_metric_accumulator()
@@ -608,6 +619,7 @@ def train_one_epoch(
                 model=model,
                 criterion=criterion,
                 batch=batch,
+                reference_dropout=reference_dropout,
             )
 
         scaler.scale(objective_loss).backward()
@@ -696,6 +708,7 @@ def validate(
                 criterion=criterion,
                 topk=diagnostic_topk,
             )
+            metric_values["grad_norm"] = 0.0  # 验证时不计算梯度
             metric_values.update(
                 {
                     key: value
@@ -841,7 +854,7 @@ def main():
 
     set_seed(int(dataloader_config["split"]["seed"]))
     device = resolve_device(training_cfg)
-    os.environ.setdefault("WANDB_MODE", "disable")
+    os.environ.setdefault("WANDB_MODE", "online")
     policy_cfg = dataloader_config.get("policy", {})
     if (
         policy_cfg.get("device") == "cuda"
@@ -1079,6 +1092,9 @@ def main():
     diagnostic_val_batches = int(
         training_cfg.get("diagnostic_val_batches", 1)
     )
+    reference_dropout = float(
+        training_cfg.get("reference_dropout", 0.5)
+    )
     checkpoint_dir = resolve_checkpoint_dir(training_cfg)
 
     config_snapshot = {
@@ -1105,6 +1121,7 @@ def main():
             diagnostic_topk=diagnostic_topk,
             wandb_log_every=wandb_log_every,
             overfit_single_batch_steps=overfit_single_batch_steps,
+            reference_dropout=reference_dropout,
         )
 
         if epoch % validate_every == 0:

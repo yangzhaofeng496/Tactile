@@ -1,0 +1,57 @@
+# 测试配置文件
+test:
+  # 基本设置
+  batch_size: null  # null表示使用dataloader配置中的batch_size
+  output_dir: "test_results"
+  diagnostic_topk: 5  # 保存top-K最差样本数量
+
+  # 消融实验设置
+  ablation:
+    # 是否启用消融实验
+    enabled: false
+
+    # 要消融的模态，可以是以下之一或组合：
+    # - "tactile": 将触觉输入置零
+    # - "state": 将state输入置零
+    # - "action": 将ACT action输入置零
+    # - ["tactile", "state"]: 同时消融多个模态
+    ablate_modalities: []
+
+    # 消融方式
+    # "zero": 直接置零
+    # "noise": 用高斯噪声替代（均值0，标准差由noise_std控制）
+    ablation_method: "zero"
+    noise_std: 0.1
+
+    # 输出文件名后缀（用于区分不同消融实验的结果）
+    # 如果为null，自动根据ablate_modalities生成
+    output_suffix: null
+
+# 示例配置：
+#
+# 消融触觉输入：
+# ablation:
+#   enabled: true
+#   ablate_modalities: ["tactile"]
+#
+# 消融state输入：
+# ablation:
+#   enabled: true
+#   ablate_modalities: ["state"]
+#
+# 消融ACT action输入：
+# ablation:
+#   enabled: true
+#   ablate_modalities: ["action"]
+#
+# 同时消融触觉和state：
+# ablation:
+#   enabled: true
+#   ablate_modalities: ["tactile", "state"]
+#
+# 用噪声替代而不是置零：
+# ablation:
+#   enabled: true
+#   ablate_modalities: ["tactile"]
+#   ablation_method: "noise"
+#   noise_std: 0.1

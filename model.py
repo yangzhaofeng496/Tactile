@@ -125,6 +125,86 @@ class TactileForceEncoder(nn.Module):
         return x
 
 
+class VQVAEForceEncoder(nn.Module):
+    """
+    使用冻结的VQ-VAE编码器处理历史合力数据
+
+    输入:
+        B, T, D  (T个时间步，每步D维合力)
+    输出:
+        B, 256  (码本向量)
+    """
+
+    def __init__(self, vqvae_checkpoint_path, freeze=True):
+        super().__init__()
+
+        # 加载VQ-VAE模型
+        from TactileSelfencoder.vqvae_model import build_vqvae_from_config
+        import os
+
+        config_path = os.path.join(os.path.dirname(vqvae_checkpoint_path), "../vqvae_config.yaml")
+        if not os.path.exists(config_path):
+            config_path = "TactileSelfencoder/vqvae_config.yaml"
+
+        self.vqvae, _ = build_vqvae_from_config(config_path)
+
+        # 加载预训练权重 (使用weights_only=False以兼容旧格式)
+        checkpoint = torch.load(vqvae_checkpoint_path, map_location='cpu', weights_only=False)
+        if 'model_state_dict' in checkpoint:
+            self.vqvae.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            self.vqvae.load_state_dict(checkpoint)
+
+        # 冻结VQ-VAE参数
+        if freeze:
+            for param in self.vqvae.parameters():
+                param.requires_grad = False
+            self.vqvae.eval()
+
+        self.freeze = freeze
+
+    def forward(self, x):
+        """
+        x: [B, T, D] 历史力数据
+        返回: [B, 256] 量化后的码本向量
+        """
+        if self.freeze:
+            self.vqvae.eval()
+            with torch.no_grad():
+                indices, z_q = self.vqvae.encode(x)
+        else:
+            indices, z_q = self.vqvae.encode(x)
+
+        return z_q
+
+
+class CurrentForceEncoder(nn.Module):
+    """
+    使用MLP处理当前6维力数据
+
+    输入:
+        B, 6  (当前时刻的6维力)
+    输出:
+        B, 128
+    """
+
+    def __init__(self, input_dim=6, hidden_dim=64, output_dim=128):
+        super().__init__()
+
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, output_dim),
+        )
+        self.output_norm = nn.LayerNorm(output_dim)
+
+    def forward(self, x):
+        """
+        x: [B, D] = [B, 6]
+        """
+        return torch.relu(self.output_norm(self.net(x)))
+
+
 
 class StateEncoder(nn.Module):
 
@@ -273,12 +353,17 @@ class TactileResidualACT(nn.Module):
         state_std=None,
         state_channel_names=None,
         normalize_state_input=False,
+        current_force_encoder_cfg=None,
+        current_force_mean=None,
+        current_force_std=None,
+        normalize_current_force_input=False,
     ):
         """
         Args:
-            tactile_encoder_type: "force" 或 "image"
+            tactile_encoder_type: "force", "image", 或 "vqvae"
                 - "force": 使用 TactileForceEncoder (1D卷积，处理12维合力)
                 - "image": 使用 TactileImageEncoder (2D卷积，处理触觉图像)
+                - "vqvae": 使用 VQVAEForceEncoder (冻结的VQ-VAE编码器)
         """
 
         super().__init__()
@@ -288,6 +373,7 @@ class TactileResidualACT(nn.Module):
         action_encoder_cfg = action_encoder_cfg or {}
         fusion_cfg = fusion_cfg or {}
         decoder_cfg = decoder_cfg or {}
+        current_force_encoder_cfg = current_force_encoder_cfg or {}
 
         # 根据配置选择触觉编码器
         if tactile_encoder_type == "force":
@@ -305,8 +391,18 @@ class TactileResidualACT(nn.Module):
                 in_channels=tactile_input_dim,
                 output_dim=tactile_output_dim,
             )
+        elif tactile_encoder_type == "vqvae":
+            tactile_input_dim = int(tactile_encoder_cfg.get("input_dim", 12))
+            tactile_output_dim = int(tactile_encoder_cfg.get("output_dim", 256))
+            vqvae_checkpoint = tactile_encoder_cfg.get("vqvae_checkpoint_path")
+            if vqvae_checkpoint is None:
+                raise ValueError("vqvae_checkpoint_path is required when tactile_encoder_type='vqvae'")
+            self.tactile_encoder = VQVAEForceEncoder(
+                vqvae_checkpoint_path=vqvae_checkpoint,
+                freeze=tactile_encoder_cfg.get("freeze", True),
+            )
         else:
-            raise ValueError(f"Unknown tactile_encoder_type: {tactile_encoder_type}. Choose 'force' or 'image'.")
+            raise ValueError(f"Unknown tactile_encoder_type: {tactile_encoder_type}. Choose 'force', 'image', or 'vqvae'.")
 
         self.tactile_encoder_type = tactile_encoder_type
         self.normalize_tactile_input = bool(normalize_tactile_input)
@@ -337,6 +433,40 @@ class TactileResidualACT(nn.Module):
         self.tactile_channel_names = tuple(channel_names)
         self.register_buffer("tactile_channel_mean", mean)
         self.register_buffer("tactile_channel_std", std)
+
+        # Current force encoder (新增)
+        current_force_input_dim = int(current_force_encoder_cfg.get("input_dim", 6))
+        current_force_output_dim = int(current_force_encoder_cfg.get("output_dim", 128))
+        self.current_force_encoder = CurrentForceEncoder(
+            input_dim=current_force_input_dim,
+            hidden_dim=int(current_force_encoder_cfg.get("hidden_dim", 64)),
+            output_dim=current_force_output_dim,
+        )
+
+        # Current force normalization (新增)
+        self.normalize_current_force_input = bool(normalize_current_force_input)
+        current_force_mean_tensor = torch.as_tensor(
+            current_force_mean if current_force_mean is not None else [],
+            dtype=torch.float32,
+        ).reshape(-1)
+        current_force_std_tensor = torch.as_tensor(
+            current_force_std if current_force_std is not None else [],
+            dtype=torch.float32,
+        ).reshape(-1)
+        if self.normalize_current_force_input:
+            if (
+                current_force_mean_tensor.numel() != current_force_input_dim
+                or current_force_std_tensor.numel() != current_force_input_dim
+            ):
+                raise ValueError(
+                    "Current force Z-score statistics must match current force input dimensions: "
+                    f"mean={current_force_mean_tensor.numel()}, "
+                    f"std={current_force_std_tensor.numel()}, expected={current_force_input_dim}."
+                )
+            if torch.any(current_force_std_tensor <= 0):
+                raise ValueError("All current force standard deviations must be positive.")
+        self.register_buffer("current_force_mean", current_force_mean_tensor)
+        self.register_buffer("current_force_std", current_force_std_tensor)
 
         state_output_dim = int(state_encoder_cfg.get("output_dim", 128))
         state_input_dim = int(state_encoder_cfg.get("input_dim", 6))
@@ -407,14 +537,14 @@ class TactileResidualACT(nn.Module):
 
         action_output_dim = int(action_encoder_cfg.get("output_dim", 256))
         expected_fusion_input_dim = (
-            tactile_output_dim + state_output_dim + action_output_dim
+            tactile_output_dim + current_force_output_dim + state_output_dim + action_output_dim
         )
         fusion_input_dim = int(
             fusion_cfg.get("input_dim", expected_fusion_input_dim)
         )
         if fusion_input_dim != expected_fusion_input_dim:
             raise ValueError(
-                "fusion.input_dim must equal tactile + state + action feature dimensions: "
+                "fusion.input_dim must equal tactile + current_force + state + action feature dimensions: "
                 f"{fusion_input_dim} vs {expected_fusion_input_dim}."
             )
         fusion_output_dim = int(fusion_cfg.get("output_dim", 256))
@@ -455,13 +585,14 @@ class TactileResidualACT(nn.Module):
     def forward(
         self,
         tactile_history,
+        current_force,
         state,
         act_chunk,
         return_feature_metrics=False,
     ):
 
         if self.normalize_tactile_input:
-            if self.tactile_encoder_type == "force":
+            if self.tactile_encoder_type == "force" or self.tactile_encoder_type == "vqvae":
                 expected_channels = self.tactile_channel_mean.numel()
                 if tactile_history.ndim != 3 or tactile_history.shape[-1] != expected_channels:
                     raise ValueError(
@@ -486,6 +617,20 @@ class TactileResidualACT(nn.Module):
 
         tactile_feature=self.tactile_encoder(tactile_history)
 
+        # 处理当前力数据
+        if self.normalize_current_force_input:
+            expected_current_force_dim = self.current_force_mean.numel()
+            if current_force.ndim != 2 or current_force.shape[-1] != expected_current_force_dim:
+                raise ValueError(
+                    "Current force input must have shape [B, D] with "
+                    f"D={expected_current_force_dim}, got {tuple(current_force.shape)}."
+                )
+            current_force = (
+                current_force.to(torch.float32) - self.current_force_mean.view(1, -1)
+            ) / self.current_force_std.view(1, -1)
+
+        current_force_feature = self.current_force_encoder(current_force)
+
         if self.normalize_state_input:
             expected_state_dim = self.state_mean.numel()
             if state.ndim != 2 or state.shape[-1] != expected_state_dim:
@@ -507,6 +652,7 @@ class TactileResidualACT(nn.Module):
         feature=torch.cat(
             [
                 tactile_feature,
+                current_force_feature,
                 state_feature,
                 action_feature
             ],
@@ -521,9 +667,10 @@ class TactileResidualACT(nn.Module):
                 f"{fusion_input_layer.out_features}."
             )
         tactile_dim = tactile_feature.shape[-1]
+        current_force_dim = current_force_feature.shape[-1]
         state_dim = state_feature.shape[-1]
         action_dim = action_feature.shape[-1]
-        expected_fusion_dim = tactile_dim + state_dim + action_dim
+        expected_fusion_dim = tactile_dim + current_force_dim + state_dim + action_dim
         if fusion_input_layer.in_features != expected_fusion_dim:
             raise RuntimeError(
                 "Fusion input dimensions do not match encoded modality dimensions: "
@@ -535,21 +682,28 @@ class TactileResidualACT(nn.Module):
             tactile_feature,
             fusion_weight[:, :tactile_dim],
         )
+        c_cf = torch.nn.functional.linear(
+            current_force_feature,
+            fusion_weight[
+                :,
+                tactile_dim:tactile_dim + current_force_dim,
+            ],
+        )
         c_s = torch.nn.functional.linear(
             state_feature,
             fusion_weight[
                 :,
-                tactile_dim:tactile_dim + state_dim,
+                tactile_dim + current_force_dim:tactile_dim + current_force_dim + state_dim,
             ],
         )
         c_a = torch.nn.functional.linear(
             action_feature,
             fusion_weight[
                 :,
-                tactile_dim + state_dim:,
+                tactile_dim + current_force_dim + state_dim:,
             ],
         )
-        h_pre = c_t + c_s + c_a + fusion_input_layer.bias
+        h_pre = c_t + c_cf + c_s + c_a + fusion_input_layer.bias
 
         z=self.fusion.encoder[1:](h_pre)
 
@@ -560,6 +714,7 @@ class TactileResidualACT(nn.Module):
             contribution_norms = torch.stack(
                 [
                     c_t.norm(p=2, dim=-1),
+                    c_cf.norm(p=2, dim=-1),
                     c_s.norm(p=2, dim=-1),
                     c_a.norm(p=2, dim=-1),
                 ],
@@ -572,6 +727,9 @@ class TactileResidualACT(nn.Module):
                 "tactile_encoder_rms": tactile_feature.square().mean(
                     dim=-1
                 ).sqrt().mean(),
+                "current_force_encoder_rms": current_force_feature.square().mean(
+                    dim=-1
+                ).sqrt().mean(),
                 "state_encoder_rms": state_feature.square().mean(
                     dim=-1
                 ).sqrt().mean(),
@@ -579,8 +737,9 @@ class TactileResidualACT(nn.Module):
                     dim=-1
                 ).sqrt().mean(),
                 "tactile_contribution_ratio": contribution_ratios[:, 0].mean(),
-                "state_contribution_ratio": contribution_ratios[:, 1].mean(),
-                "action_contribution_ratio": contribution_ratios[:, 2].mean(),
+                "current_force_contribution_ratio": contribution_ratios[:, 1].mean(),
+                "state_contribution_ratio": contribution_ratios[:, 2].mean(),
+                "action_contribution_ratio": contribution_ratios[:, 3].mean(),
             }
             return delta_action, feature_metrics
 

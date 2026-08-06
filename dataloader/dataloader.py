@@ -24,16 +24,19 @@ from lerobot.policies.factory import (
 @dataclass(frozen=True)
 class DatasetKeys:
     tactile_type: str  # "image" or "force"
-    tactile_image: str | list[str]
     tactile_force: str | list[str]
+    current_force: str | list[str]  # 新增：当前力数据键
     state: str
     expert_action: str
+    tactile_image: str | list[str] | None = None  # 可选：仅当tactile_type="image"时需要
     tactile_force_channel_order: list[str] | None = None
 
     @property
     def tactile(self) -> str | list[str]:
         """根据 tactile_type 返回对应的触觉键"""
         if self.tactile_type == "image":
+            if self.tactile_image is None:
+                raise ValueError("tactile_type='image' 时必须提供 tactile_image 键")
             return self.tactile_image
         elif self.tactile_type == "force":
             return self.tactile_force
@@ -396,6 +399,25 @@ class TactileACTDataset(Dataset):
             else:
                 raise ValueError(f"未知的 tactile_type: {self.tactile_type}")
 
+        # 处理当前力数据（新增）
+        if isinstance(self.keys.current_force, str):
+            current_force = sample[self.keys.current_force].float()
+        else:
+            # 多个当前力输入在维度拼接
+            current_force_tensors = [
+                sample[key].float()
+                for key in self.keys.current_force
+            ]
+            current_force = torch.cat(current_force_tensors, dim=-1)
+
+        # 如果current_force有时间维度，取最后一帧
+        if current_force.ndim > 1 and current_force.shape[0] > 1:
+            current_force = current_force[-1]
+
+        # 如果是单帧但有时间维度，squeeze掉
+        if current_force.ndim > 1 and current_force.shape[0] == 1:
+            current_force = current_force.squeeze(0)
+
         expert_action = sample[self.keys.expert_action].float()
 
         if tactile_history.shape[0] != self.tactile_history:
@@ -414,6 +436,7 @@ class TactileACTDataset(Dataset):
 
         output: dict[str, Tensor] = {
             "tactile_history": tactile_history,
+            "current_force": current_force,  # 新增
             "expert_action": expert_action,
             "episode_index": torch.as_tensor(
                 sample["episode_index"],
@@ -638,11 +661,18 @@ def check_dataset_features(
     else:
         tactile_keys = set(keys.tactile)
 
+    # 处理单个或多个当前力键
+    if isinstance(keys.current_force, str):
+        current_force_keys = {keys.current_force}
+    else:
+        current_force_keys = set(keys.current_force)
+
     required = {
         keys.state,
         keys.expert_action,
         *act_observation_keys,
         *tactile_keys,
+        *current_force_keys,
     }
 
     missing = required - available

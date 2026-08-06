@@ -1,19 +1,37 @@
+# 数据集
 dataset/
+
+# Python缓存
 .cache/
 __pycache__/
 */__pycache__/
 *.py[cod]
 
+# 权重和checkpoint
 checkpoints/
+output/
 outputs/
 wandb/
 actmodel/
-deform_autodecoder/checkpoints/
+*.pth
+*.pt
+*.ckpt
 
+# VQ-VAE checkpoints
+TactileSelfencoder/vqvae_checkpoints/
+
+# 训练输出
+test_results/
+outlier_analysis/
+
+# 日志和临时文件
 .DS_Store
 *.log
+*_pid.txt
 Screenshot*.png
+*.mp4
 
+# 分析结果
 dataloader/util/tactile_analysis/figures/
 dataloader/util/tactile_analysis/tables/
 dataloader/util/tactile_analysis/analysis_report.md

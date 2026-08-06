@@ -2,15 +2,16 @@
 
 # 触觉编码器类型选择
 tactile_encoder:
-  # 可选: "force" 或 "image"
+  # 可选: "force", "image", 或 "vqvae"
   # - "force": 使用1D时间卷积处理6维合力历史 (输入: [B, 16, 6])
   # - "image": 使用2D卷积处理触觉图像 (输入: [B, 10, 6, 288, 384])
-  type: "force"
+  # - "vqvae": 使用冻结的VQ-VAE编码器处理历史力数据 (输入: [B, T, D])
+  type: "vqvae"
 
   # 合力编码器参数 (当 type="force" 时使用)
   force:
     input_dim: 12         # 输入维度 (左右各6维，拼接后12维)
-    hidden_dim: 128        # 隐藏层维度
+    hidden_dim: 128       # 隐藏层维度
     output_dim: 256       # 输出维度
     history_length: 30    # 历史时间步数
     channel_order:
@@ -27,11 +28,26 @@ tactile_encoder:
       - right_My
       - right_Mz
 
+  # VQ-VAE编码器参数 (当 type="vqvae" 时使用)
+  vqvae:
+    input_dim: 12                    # 输入维度 (与VQ-VAE训练时一致)
+    output_dim: 256                  # 输出维度 (码本向量维度)
+    vqvae_checkpoint_path: "TactileSelfencoder/vqvae_checkpoints/checkpoint_best.pth"
+    freeze: true                     # 是否冻结VQ-VAE参数
+
   # 图像编码器参数 (当 type="image" 时使用)
   image:
     in_channels: 6        # 输入通道数 (左右触觉拼接)
     history_length: 10    # 历史帧数
     image_size: [288, 384]  # 图像尺寸 [H, W]
+
+# 当前力编码器参数 (新增)
+current_force_encoder:
+  input_dim: 12          # 当前时刻的12维力（左右各6维拼接）
+  hidden_dim: 64         # 隐藏层维度
+  output_dim: 128        # 输出维度
+  normalize_input: false # 是否归一化输入
+  # stats_path: "/home/yang/TactileEncoder/dataloader/util/tactile_analysis/current_force_stats.json"
 
 # 状态编码器参数
 state_encoder:
@@ -56,7 +72,7 @@ action_encoder:
 
 # 融合模块参数
 fusion:
-  input_dim: 640          # 256 + 128 + 256
+  input_dim: 768          # 256(tactile) + 128(current_force) + 128(state) + 256(action)
   hidden_dim: 512
   output_dim: 256
 
@@ -77,14 +93,14 @@ training:
   device: "cuda"
   validate_every: 3
   checkpoint_every: 10
-  checkpoint_dir: "/home/yang/TactileEncoder/checkpoints/weight"
+  checkpoint_dir: "/home/yang/TactileEncoder/actmodel/dm_act_orin_fail/so101/dm_act_orin_fail/checkpoints/100000"
   log_every: 10
   diagnostic_topk: 3
   diagnostic_val_batches: 1
   overfit_single_batch_steps: 0
   resume_checkpoint: null
   override_tactile_loss_from_checkpoint: false
-  use_tactile_weighted_loss: true
+  use_tactile_weighted_loss: false
   tactile_weight_tau: 1.3
   tactile_weight_alpha: 2.0
   tactile_weight_slope: 5.0
@@ -94,3 +110,4 @@ training:
     image: null  # 提供图像触觉统计文件；若输入已标准化，可使用匹配通道数的零均值/单位方差统计
   tactile_stats_path: "/home/yang/TactileEncoder/dataloader/util/tactile_analysis/tactile_stats.json"  # 兼容旧配置；仅在 tactile_stats_paths 缺失时回退
   tactile_input_already_normalized: false
+  reference_dropout: 0  # 训练时state和action各自独立置零的概率

@@ -140,6 +140,109 @@ def build_force_dataloader(config):
         os.chdir(original_dir)
 
 
+def visualize_clustering_simple(z_e_list, indices_list, codebook, save_path, title="Clustering"):
+    """
+    Simple PCA-based clustering visualization.
+
+    Args:
+        z_e_list: list of encoder outputs [B, D]
+        indices_list: list of codebook indices [B]
+        codebook: [K, D] codebook embeddings
+        save_path: where to save the plot
+        title: plot title
+    """
+    import numpy as np
+
+    # Concatenate all batches
+    z_e_all = torch.cat(z_e_list, dim=0).cpu().numpy()  # [N, D]
+    indices_all = torch.cat(indices_list, dim=0).cpu().numpy()  # [N]
+    codebook_np = codebook.detach().cpu().numpy()  # [K, D]
+
+    # Simple PCA to 2D (manual implementation, no sklearn needed)
+    combined = np.vstack([z_e_all, codebook_np])
+
+    # Center the data
+    mean = combined.mean(axis=0)
+    centered = combined - mean
+
+    # Compute covariance and eigenvalues
+    cov = np.cov(centered.T)
+    eigenvalues, eigenvectors = np.linalg.eigh(cov)
+
+    # Sort by eigenvalues (descending)
+    idx = eigenvalues.argsort()[::-1]
+    eigenvectors = eigenvectors[:, idx]
+
+    # Project to 2D
+    combined_2d = centered @ eigenvectors[:, :2]
+
+    z_e_2d = combined_2d[:len(z_e_all)]
+    codebook_2d = combined_2d[len(z_e_all):]
+
+    # Plot
+    num_codes = codebook_np.shape[0]
+    fig, ax = plt.subplots(figsize=(12, 10))
+
+    # Get colormap (compatible with newer matplotlib versions)
+    if num_codes <= 10:
+        cmap = plt.colormaps.get_cmap('tab10') if hasattr(plt, 'colormaps') else plt.cm.tab10
+    else:
+        cmap = plt.colormaps.get_cmap('tab20') if hasattr(plt, 'colormaps') else plt.cm.tab20
+
+    # Plot samples colored by codebook assignment
+    for code_idx in range(num_codes):
+        mask = indices_all == code_idx
+        count = mask.sum()
+
+        if count > 0:
+            ax.scatter(
+                z_e_2d[mask, 0],
+                z_e_2d[mask, 1],
+                c=[cmap(code_idx)],
+                label=f'Code {code_idx} ({count})',
+                alpha=0.6,
+                s=20,
+                edgecolors='none'
+            )
+
+    # Plot codebook centers
+    ax.scatter(
+        codebook_2d[:, 0],
+        codebook_2d[:, 1],
+        c=[cmap(i) for i in range(num_codes)],
+        marker='*',
+        s=500,
+        edgecolors='black',
+        linewidths=2,
+        zorder=10
+    )
+
+    # Add labels
+    for i, (x, y) in enumerate(codebook_2d):
+        ax.annotate(
+            f'{i}',
+            (x, y),
+            fontsize=12,
+            fontweight='bold',
+            ha='center',
+            va='center',
+            color='white',
+            zorder=11
+        )
+
+    ax.set_xlabel('PC1', fontsize=12)
+    ax.set_ylabel('PC2', fontsize=12)
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.legend(loc='center left', bbox_to_anchor=(1, 0.5), fontsize=10, framealpha=0.9)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+
+    # Return the figure instead of saving to file
+    # Caller will handle uploading to wandb and closing
+    return fig
+
+
 def train_epoch(model, dataloader, optimizer, device, epoch, config, use_wandb=False):
     """Train for one epoch."""
     model.train()
@@ -152,6 +255,11 @@ def train_epoch(model, dataloader, optimizer, device, epoch, config, use_wandb=F
 
     log_every = config['training']['log_every']
     wandb_log_every = config['training'].get('wandb_log_every', 10)
+
+    # For clustering visualization - collect all samples throughout epoch
+    collect_for_clustering = use_wandb
+    all_z_e = []
+    all_indices = []
 
     pbar = tqdm(dataloader, desc=f"Epoch {epoch} [Train]")
 
@@ -223,6 +331,14 @@ def train_epoch(model, dataloader, optimizer, device, epoch, config, use_wandb=F
         total_codebook_loss += output['codebook_loss'].item()
         total_commitment_loss += output['commitment_loss'].item()
 
+        # Collect encoder outputs and indices for end-of-epoch clustering visualization
+        if collect_for_clustering:
+            with torch.no_grad():
+                z_e = model.encoder(x)
+                z_e_normalized = model.quantizer.rms_norm(z_e)
+                all_z_e.append(z_e_normalized.detach().cpu())
+                all_indices.append(output['indices'].detach().cpu())
+
         if use_wandb and (batch_idx + 1) % wandb_log_every == 0:
             global_step = (epoch - 1) * len(dataloader) + batch_idx + 1
             wandb.log({
@@ -254,10 +370,15 @@ def train_epoch(model, dataloader, optimizer, device, epoch, config, use_wandb=F
         'commitment_loss': total_commitment_loss / num_batches,
     }
 
+    # Return clustering data if collected
+    if collect_for_clustering and all_z_e:
+        metrics['z_e_all'] = torch.cat(all_z_e, dim=0)
+        metrics['indices_all'] = torch.cat(all_indices, dim=0)
+
     return metrics
 
 
-def validate(model, dataloader, device, split_name="Val"):
+def validate(model, dataloader, device, split_name="Val", collect_embeddings=False, max_samples=2000):
     """Validate the model."""
     model.eval()
 
@@ -268,6 +389,9 @@ def validate(model, dataloader, device, split_name="Val"):
     total_commitment_loss = 0
 
     all_indices = []
+    z_e_list = []
+    indices_list = []
+    total_samples = 0
 
     with torch.no_grad():
         pbar = tqdm(dataloader, desc=f"[{split_name}]")
@@ -289,6 +413,18 @@ def validate(model, dataloader, device, split_name="Val"):
 
             all_indices.append(output['indices'].cpu())
 
+            # Collect embeddings for clustering visualization
+            if collect_embeddings and total_samples < max_samples:
+                z_e = model.encoder(x)
+                z_e_normalized = model.quantizer.rms_norm(z_e)
+
+                remaining = max_samples - total_samples
+                take = min(z_e_normalized.shape[0], remaining)
+
+                z_e_list.append(z_e_normalized[:take].cpu())
+                indices_list.append(output['indices'][:take].cpu())
+                total_samples += take
+
     num_batches = len(dataloader)
     metrics = {
         'loss': total_loss / num_batches,
@@ -307,6 +443,10 @@ def validate(model, dataloader, device, split_name="Val"):
     metrics['codebook_usage'] = usage_rate
     metrics['used_codes'] = used_codes
     metrics['usage_counts'] = usage_counts.cpu().numpy()
+
+    if collect_embeddings:
+        metrics['z_e_list'] = z_e_list
+        metrics['indices_list'] = indices_list
 
     return metrics
 
@@ -353,7 +493,7 @@ def main():
     print(f"Embedding dim: {config['model']['quantizer']['embedding_dim']}")
 
     # Dead code replacement status
-    if config['model'].get('dead_code_replacement', {}).get('enabled', False):
+    if config.get('dead_code_replacement', {}).get('enabled', False):
         print(f"✓ Dead code replacement: enabled")
     else:
         print(f"  Dead code replacement: disabled")
@@ -410,7 +550,47 @@ def main():
         print(f"\nEpoch {epoch+1}/{num_epochs}")
 
         train_metrics = train_epoch(model, train_loader, optimizer, device, epoch+1, config, use_wandb=use_wandb)
-        val_metrics = validate(model, val_loader, device, split_name="Val")
+        val_metrics = validate(model, val_loader, device, split_name="Val", collect_embeddings=use_wandb, max_samples=2000)
+
+        # Visualize clustering at end of epoch (only if wandb is enabled)
+        if use_wandb:
+            # Visualize training set clustering
+            if 'z_e_all' in train_metrics:
+                fig = visualize_clustering_simple(
+                    [train_metrics['z_e_all']],
+                    [train_metrics['indices_all']],
+                    model.quantizer.embedding,
+                    None,
+                    title=f'Training Set Clustering - Epoch {epoch+1}'
+                )
+                wandb.log({
+                    'clustering/epoch_train': wandb.Image(fig),
+                    'epoch': epoch + 1,
+                })
+                plt.close(fig)
+
+                # Clean up to save memory
+                del train_metrics['z_e_all']
+                del train_metrics['indices_all']
+
+            # Visualize validation set clustering
+            if 'z_e_list' in val_metrics and val_metrics['z_e_list']:
+                fig = visualize_clustering_simple(
+                    val_metrics['z_e_list'],
+                    val_metrics['indices_list'],
+                    model.quantizer.embedding,
+                    None,
+                    title=f'Validation Set Clustering - Epoch {epoch+1}'
+                )
+                wandb.log({
+                    'clustering/epoch_val': wandb.Image(fig),
+                    'epoch': epoch + 1,
+                })
+                plt.close(fig)
+
+                # Clean up to save memory
+                del val_metrics['z_e_list']
+                del val_metrics['indices_list']
 
         print(f"\n{'='*60}")
         print(f"Epoch {epoch+1} Results:")
