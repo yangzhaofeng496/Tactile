@@ -5,7 +5,7 @@ tactile_encoder:
   # 可选: "force", "image", 或 "vqvae"
   # - "force": 使用1D时间卷积处理6维合力历史 (输入: [B, 16, 6])
   # - "image": 使用2D卷积处理触觉图像 (输入: [B, 10, 6, 288, 384])
-  # - "vqvae": 使用冻结的VQ-VAE编码器处理历史力数据 (输入: [B, T, D])
+  # - "vqvae": 使用预训练的VQ-VAE编码器处理历史力数据 (输入: [B, T, D])
   type: "vqvae"
 
   # 合力编码器参数 (当 type="force" 时使用)
@@ -28,18 +28,20 @@ tactile_encoder:
       - right_My
       - right_Mz
 
-  # VQ-VAE编码器参数 (当 type="vqvae" 时使用)
-  vqvae:
-    input_dim: 12                    # 输入维度 (与VQ-VAE训练时一致)
-    output_dim: 256                  # 输出维度 (码本向量维度)
-    vqvae_checkpoint_path: "TactileSelfencoder/vqvae_checkpoints/checkpoint_best.pth"
-    freeze: true                     # 是否冻结VQ-VAE参数
-
   # 图像编码器参数 (当 type="image" 时使用)
   image:
     in_channels: 6        # 输入通道数 (左右触觉拼接)
     history_length: 10    # 历史帧数
     image_size: [288, 384]  # 图像尺寸 [H, W]
+
+  # VQ-VAE编码器参数 (当 type="vqvae" 时使用)
+  vqvae:
+    input_dim: 12                    # 输入维度 (与VQ-VAE训练时一致)
+    output_dim: 256                  # 输出维度 (码本向量维度)
+    history_length: 15               # 历史时间步数 (必须与VQ-VAE训练时一致)
+    vqvae_config_path: "/home/yang/TactileEncoder/TactileSelfencoder/vqvae_config.yaml"
+    vqvae_checkpoint_path: "/home/yang/TactileEncoder/TactileSelfencoder/vqvae_checkpoints/50_16tokens_resume/checkpoint_epoch_100.pth"
+    freeze: true                     # 是否冻结VQ-VAE参数
 
 # 当前力编码器参数 (新增)
 current_force_encoder:
@@ -107,6 +109,7 @@ training:
   tactile_weight_eps: 1e-6
   tactile_stats_paths:
     force: "/home/yang/TactileEncoder/dataloader/util/tactile_analysis/tactile_stats.json"
+    vqvae: "/home/yang/TactileEncoder/dataloader/util/tactile_analysis/tactile_stats.json"
     image: null  # 提供图像触觉统计文件；若输入已标准化，可使用匹配通道数的零均值/单位方差统计
   tactile_stats_path: "/home/yang/TactileEncoder/dataloader/util/tactile_analysis/tactile_stats.json"  # 兼容旧配置；仅在 tactile_stats_paths 缺失时回退
   tactile_input_already_normalized: false

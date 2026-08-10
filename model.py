@@ -163,10 +163,12 @@ class VQVAEForceEncoder(nn.Module):
 
         self.freeze = freeze
 
-    def forward(self, x):
+    def forward(self, x, return_token_id=False):
         """
         x: [B, T, D] 历史力数据
-        返回: [B, 256] 量化后的码本向量
+        返回:
+            - 如果 return_token_id=False: [B, 256] 量化后的码本向量
+            - 如果 return_token_id=True: (z_q, indices) 其中 indices 是 [B] token ID
         """
         if self.freeze:
             self.vqvae.eval()
@@ -175,6 +177,8 @@ class VQVAEForceEncoder(nn.Module):
         else:
             indices, z_q = self.vqvae.encode(x)
 
+        if return_token_id:
+            return z_q, indices
         return z_q
 
 
@@ -615,7 +619,12 @@ class TactileResidualACT(nn.Module):
                     - self.tactile_channel_mean.view(1, 1, -1, 1, 1)
                 ) / self.tactile_channel_std.view(1, 1, -1, 1, 1)
 
-        tactile_feature=self.tactile_encoder(tactile_history)
+        # 获取触觉特征，VQ-VAE模式下同时获取token ID
+        vqvae_token_id = None
+        if self.tactile_encoder_type == "vqvae":
+            tactile_feature, vqvae_token_id = self.tactile_encoder(tactile_history, return_token_id=True)
+        else:
+            tactile_feature = self.tactile_encoder(tactile_history)
 
         # 处理当前力数据
         if self.normalize_current_force_input:
@@ -741,6 +750,9 @@ class TactileResidualACT(nn.Module):
                 "state_contribution_ratio": contribution_ratios[:, 2].mean(),
                 "action_contribution_ratio": contribution_ratios[:, 3].mean(),
             }
+            # VQ-VAE模式下添加token ID
+            if vqvae_token_id is not None:
+                feature_metrics["vqvae_token_id"] = vqvae_token_id
             return delta_action, feature_metrics
 
         return delta_action
@@ -758,18 +770,49 @@ def compute_target_delta(
 def residual_loss(
     pred_delta,
     expert_action,
-    act_chunk
+    act_chunk,
+    alpha=3.0,
+    weight_max=5.0,
+    return_difficulty=False,
 ):
+    """
+    Difficulty-based weighted SmoothL1 loss for residual policy.
 
-    target_delta = compute_target_delta(
-        expert_action,
-        act_chunk
-    )
+    Args:
+        pred_delta: [B, T, D] predicted residual action
+        expert_action: [B, T, D] expert action
+        act_chunk: [B, T, D] ACT action
+        alpha: difficulty scaling factor (default: 3.0)
+        weight_max: maximum sample weight (default: 5.0)
+        return_difficulty: whether to return difficulty and weight info
 
-    loss=nn.functional.mse_loss(
-        pred_delta,
-        target_delta
-    )
+    Returns:
+        loss: weighted SmoothL1 loss
+        (optional) difficulty, sample_weight if return_difficulty=True
+    """
+    # Calculate residual target
+    target_delta = compute_target_delta(expert_action, act_chunk)
+
+    # Calculate difficulty (L2 norm, detached to prevent backprop to ACT/expert)
+    difficulty = torch.norm(expert_action - act_chunk, p=2, dim=-1).detach()  # [B, T]
+
+    # Generate sample weights
+    sample_weight = torch.clamp(1.0 + alpha * difficulty, min=1.0, max=weight_max)  # [B, T]
+
+    # Compute SmoothL1 loss per element
+    element_loss = nn.functional.smooth_l1_loss(pred_delta, target_delta, reduction="none")  # [B, T, D]
+
+    # Average over action dimensions
+    per_step_loss = element_loss.mean(dim=-1)  # [B, T]
+
+    # Apply weights
+    weighted_loss = per_step_loss * sample_weight  # [B, T]
+
+    # Normalize by sum of weights
+    loss = weighted_loss.sum() / (sample_weight.sum() + 1e-8)
+
+    if return_difficulty:
+        return loss, difficulty, sample_weight
 
     return loss
 
@@ -807,14 +850,14 @@ class TactileMagnitudeWeightedMSE(nn.Module):
             )
 
         tactile_type = str(tactile_type).lower()
-        if tactile_type not in {"force", "image"}:
+        if tactile_type not in {"force", "image", "vqvae"}:
             raise ValueError(
-                "tactile_type must be 'force' or 'image', got "
+                "tactile_type must be 'force', 'image', or 'vqvae', got "
                 f"{tactile_type!r}."
             )
-        if tactile_type == "force" and mean.numel() != 12:
+        if tactile_type in {"force", "vqvae"} and mean.numel() != 12:
             raise ValueError(
-                "Force tactile weighting expects 12 tactile channels, got "
+                "Force/VQ-VAE tactile weighting expects 12 tactile channels, got "
                 f"{mean.numel()}."
             )
 
@@ -917,14 +960,14 @@ class TactileMagnitudeWeightedMSE(nn.Module):
         self,
         tactile_history,
     ):
-        expected_ndim = 3 if self.tactile_type == "force" else 5
+        expected_ndim = 3 if self.tactile_type in {"force", "vqvae"} else 5
         self._check_tensor(
             "tactile_history",
             tactile_history,
             expected_ndim=expected_ndim,
         )
 
-        if self.tactile_type == "force":
+        if self.tactile_type in {"force", "vqvae"}:
             tactile_channels = tactile_history.shape[-1]
             if tactile_channels != self.channel_mean.numel():
                 raise ValueError(
@@ -1008,7 +1051,7 @@ class TactileMagnitudeWeightedMSE(nn.Module):
 
         tactile_float = tactile_history.detach().to(torch.float32)
 
-        if self.tactile_type == "force":
+        if self.tactile_type in {"force", "vqvae"}:
             magnitude = self._compute_force_window_magnitude(
                 tactile_float
             )
@@ -1041,6 +1084,7 @@ class TactileMagnitudeWeightedMSE(nn.Module):
         tactile_history,
         act_chunk=None,
         expert_action=None,
+        feature_metrics=None,
     ):
         self._check_tensor(
             "pred_delta",
@@ -1109,6 +1153,31 @@ class TactileMagnitudeWeightedMSE(nn.Module):
             dim=(1, 2)
         )
 
+        # VQ-VAE模式：直接使用unweighted loss，只返回token ID和modality contribution
+        if self.tactile_type == "vqvae":
+            objective_loss = loss_per_window.mean()
+
+            metrics = {}
+
+            # 从feature_metrics复制modality contribution和token ID
+            if feature_metrics is not None:
+                # Modality contribution
+                if "tactile_contribution_ratio" in feature_metrics:
+                    metrics["tactile_contribution_ratio"] = feature_metrics["tactile_contribution_ratio"]
+                if "current_force_contribution_ratio" in feature_metrics:
+                    metrics["current_force_contribution_ratio"] = feature_metrics["current_force_contribution_ratio"]
+                if "state_contribution_ratio" in feature_metrics:
+                    metrics["state_contribution_ratio"] = feature_metrics["state_contribution_ratio"]
+                if "action_contribution_ratio" in feature_metrics:
+                    metrics["action_contribution_ratio"] = feature_metrics["action_contribution_ratio"]
+
+                # VQ-VAE token ID
+                if "vqvae_token_id" in feature_metrics:
+                    metrics["vqvae_token_id"] = feature_metrics["vqvae_token_id"]
+
+            return objective_loss, metrics
+
+        # Force/Image模式：使用原有的magnitude-based weighting
         tactile_magnitude, window_weights = (
             self.compute_window_weights(
                 tactile_history
@@ -1124,73 +1193,84 @@ class TactileMagnitudeWeightedMSE(nn.Module):
         else:
             objective_loss = loss_per_window.mean()
 
-        weighted_loss = self.reduce_weighted_losses(
-            loss_per_window=loss_per_window,
-            window_weights=window_weights,
-            eps=self.eps,
-        )
-        unweighted_loss = loss_per_window.mean()
+        # 只在use_weighted_loss=True时计算完整的指标
+        metrics = {}
 
-        high_mask = tactile_magnitude >= self.tau
-        low_mask = ~high_mask
+        if self.use_weighted_loss:
+            weighted_loss = self.reduce_weighted_losses(
+                loss_per_window=loss_per_window,
+                window_weights=window_weights,
+                eps=self.eps,
+            )
+            unweighted_loss = loss_per_window.mean()
 
-        if act_chunk is not None and expert_action is not None:
-            final_action_error = (
-                pred_float
-                + act_chunk.to(torch.float32)
-                - expert_action.to(torch.float32)
-            ).square().mean(dim=(1, 2))
-            final_action_mse = final_action_error.mean()
-        else:
-            final_action_mse = unweighted_loss
+            high_mask = tactile_magnitude >= self.tau
+            low_mask = ~high_mask
 
-        zero = torch.zeros(
-            (),
-            dtype=torch.float32,
-            device=pred_delta.device,
-        )
-        high_loss = (
-            loss_per_window[high_mask].mean()
-            if high_mask.any()
-            else zero
-        )
-        low_loss = (
-            loss_per_window[low_mask].mean()
-            if low_mask.any()
-            else zero
-        )
+            if act_chunk is not None and expert_action is not None:
+                final_action_error = (
+                    pred_float
+                    + act_chunk.to(torch.float32)
+                    - expert_action.to(torch.float32)
+                ).square().mean(dim=(1, 2))
+                final_action_mse = final_action_error.mean()
+            else:
+                final_action_mse = unweighted_loss
 
-        metrics = {
-            "weighted_loss": weighted_loss.detach(),
-            "unweighted_loss": unweighted_loss.detach(),
-            "tactile_magnitude_mean": tactile_magnitude.mean().detach(),
-            "tactile_magnitude_min": tactile_magnitude.min().detach(),
-            "tactile_magnitude_max": tactile_magnitude.max().detach(),
-            "weight_mean": window_weights.mean().detach(),
-            "weight_min": window_weights.min().detach(),
-            "weight_max": window_weights.max().detach(),
-            "weight_p50": torch.quantile(
-                window_weights,
-                0.50,
-            ).detach(),
-            "weight_p90": torch.quantile(
-                window_weights,
-                0.90,
-            ).detach(),
-            "weight_p95": torch.quantile(
-                window_weights,
-                0.95,
-            ).detach(),
-            "fraction_above_tau": high_mask.to(
-                torch.float32
-            ).mean().detach(),
-            "high_weight_loss": high_loss.detach(),
-            "low_weight_loss": low_loss.detach(),
-            "high_magnitude_mse": high_loss.detach(),
-            "low_magnitude_mse": low_loss.detach(),
-            "final_action_mse": final_action_mse.detach(),
-            "tau": self.tau.detach(),
-        }
+            zero = torch.zeros(
+                (),
+                dtype=torch.float32,
+                device=pred_delta.device,
+            )
+            high_loss = (
+                loss_per_window[high_mask].mean()
+                if high_mask.any()
+                else zero
+            )
+            low_loss = (
+                loss_per_window[low_mask].mean()
+                if low_mask.any()
+                else zero
+            )
+
+            metrics = {
+                "weighted_loss": weighted_loss.detach(),
+                "unweighted_loss": unweighted_loss.detach(),
+                "tactile_magnitude_mean": tactile_magnitude.mean().detach(),
+                "tactile_magnitude_min": tactile_magnitude.min().detach(),
+                "tactile_magnitude_max": tactile_magnitude.max().detach(),
+                "weight_mean": window_weights.mean().detach(),
+                "weight_min": window_weights.min().detach(),
+                "weight_max": window_weights.max().detach(),
+                "weight_p50": torch.quantile(
+                    window_weights,
+                    0.50,
+                ).detach(),
+                "weight_p90": torch.quantile(
+                    window_weights,
+                    0.90,
+                ).detach(),
+                "weight_p95": torch.quantile(
+                    window_weights,
+                    0.95,
+                ).detach(),
+                "fraction_above_tau": high_mask.to(
+                    torch.float32
+                ).mean().detach(),
+                "high_weight_loss": high_loss.detach(),
+                "low_weight_loss": low_loss.detach(),
+                "high_magnitude_mse": high_loss.detach(),
+                "low_magnitude_mse": low_loss.detach(),
+                "final_action_mse": final_action_mse.detach(),
+                "tau": self.tau.detach(),
+            }
+
+        # 添加modality contribution（如果有）
+        if feature_metrics is not None:
+            metrics["tactile_contribution_ratio"] = feature_metrics.get("tactile_contribution_ratio", torch.tensor(0.0))
+            metrics["current_force_contribution_ratio"] = feature_metrics.get("current_force_contribution_ratio", torch.tensor(0.0))
+            metrics["state_contribution_ratio"] = feature_metrics.get("state_contribution_ratio", torch.tensor(0.0))
+            metrics["action_contribution_ratio"] = feature_metrics.get("action_contribution_ratio", torch.tensor(0.0))
 
         return objective_loss, metrics
 
