@@ -1,106 +1,158 @@
-# Tactile VQ-VAE
+# TactileSelfencoder 目录说明
 
-Vector Quantized Variational AutoEncoder (VQ-VAE) for encoding tactile force history into discrete tokens.
+本目录包含触觉编码器的实现，包括T-Rex官方VQ-VAE适配和其他实验性实现。
 
-## Model Architecture
+---
 
-- **Encoder**: 1D CNN that processes temporal force history [B, T, D] → continuous embedding [B, 256]
-- **Quantizer**: EMA-based vector quantizer with RMS normalization and dead code replacement
-- **Decoder**: MLP that reconstructs force history from quantized embeddings
-
-## Key Features
-
-- **RMS Normalization**: Applied before quantization for scale consistency
-- **EMA Codebook Update**: Exponential moving average instead of gradient descent
-- **Dead Code Replacement**: Automatically reinitializes unused codebook entries
-- **Commitment Loss**: Encourages encoder to commit to codebook entries
-
-## Files
+## 📁 目录结构
 
 ```
 TactileSelfencoder/
-├── vqvae_config.yaml           # Model and training configuration
-├── vqvae_model.py              # Model implementation
-├── train_vqvae.py              # Training script
-├── visualize_tokens.py         # Validation set visualization
-├── visualize_single_episode.py # Single episode visualization
-└── vqvae_checkpoints/          # Saved model checkpoints
+├── trex_official/          # T-Rex官方VQ-VAE实现（未修改）
+│   ├── encoder.py          - F6PerFingerEncoder
+│   ├── decoder.py          - F6PerFingerDecoder  
+│   ├── quantizer.py        - VQEMAQuantizer
+│   ├── tactile_vqvae.py    - TactileVQVAE主模型
+│   └── __init__.py         - 模块导出
+│
+├── trex_docs/              # 完整文档和测试
+│   ├── README.md           - 文档索引（从这里开始）
+│   ├── QUICKSTART_TREX.md  - 快速开始指南
+│   ├── README_TREX.md      - 详细使用文档
+│   ├── TREX_2FINGER_SUMMARY.md - 项目报告
+│   ├── T-REX_OFFICIAL_ANALYSIS.md - 官方代码分析
+│   ├── TREX_PROJECT_FILES.md - 文件清单
+│   └── test_trex_model.py  - 单元测试
+│
+├── vqvae_checkpoints/      # 训练好的模型checkpoint
+│   ├── so101/
+│   ├── umi/
+│   └── 50_16tokens_resume/
+│
+├── [T-Rex VQ-VAE 训练脚本]
+│   ├── compute_trex_stats.py      - 计算数据统计量
+│   ├── train_trex_vqvae.py        - 训练脚本
+│   ├── inference_trex.py          - 推理和可视化
+│   └── trex_2finger_config.yaml   - 训练配置
+│
+└── [其他实验性实现]
+    ├── vqvae_model.py              - 原始VQ-VAE实现
+    ├── train_vqvae.py              - 原始训练脚本
+    ├── inference.py                - 原始推理
+    └── vqvae_config.yaml           - 原始配置
 ```
 
-## Training
+---
+
+## 🚀 快速开始（T-Rex VQ-VAE）
+
+### 推荐路径：从文档开始
 
 ```bash
-python TactileSelfencoder/train_vqvae.py
+# 1. 阅读快速开始指南
+cat TactileSelfencoder/trex_docs/QUICKSTART_TREX.md
+
+# 2. 运行单元测试
+python TactileSelfencoder/trex_docs/test_trex_model.py
+
+# 3. 计算数据统计量
+python TactileSelfencoder/compute_trex_stats.py \
+    --data_config dataloader/vqvae_tactile.yaml \
+    --output TactileSelfencoder/trex_tactile_stats.json
+
+# 4. 开始训练
+python TactileSelfencoder/train_trex_vqvae.py \
+    --config TactileSelfencoder/trex_2finger_config.yaml \
+    --data_config dataloader/vqvae_tactile.yaml \
+    --stats TactileSelfencoder/trex_tactile_stats.json \
+    --output_dir outputs/trex_vqvae
 ```
 
-Resume from checkpoint:
+**或使用一键脚本**:
 ```bash
-python TactileSelfencoder/train_vqvae.py --resume TactileSelfencoder/vqvae_checkpoints/checkpoint_best.pth
+./run_trex_pipeline.sh
 ```
 
-## Visualization
+---
 
-Visualize validation set:
-```bash
-python TactileSelfencoder/visualize_tokens.py --output test_visualization.mp4
-```
+## 📚 文档入口
 
-Visualize specific frames:
-```bash
-python TactileSelfencoder/visualize_single_episode.py --split val --start-frame 0 --end-frame 500
-```
+**主文档目录**: [trex_docs/README.md](trex_docs/README.md)
 
-Visualize entire split:
-```bash
-python TactileSelfencoder/visualize_single_episode.py --split train
-```
+从那里可以找到：
+- ✅ 快速开始指南
+- ✅ 详细使用文档  
+- ✅ 完整项目报告
+- ✅ 官方代码分析
+- ✅ 文件清单索引
 
-## Configuration
+---
 
-Key parameters in `vqvae_config.yaml`:
+## 🎯 主要实现对比
 
-- `history_steps: 15` - Temporal window size
-- `force_dim: 12` - Force sensor dimensions
-- `num_embeddings: 16` - Codebook size
-- `embedding_dim: 256` - Latent dimension
-- `commitment_cost: 500.0` - Commitment loss weight
-- `ema_decay: 0.9` - EMA update rate
+| 特性 | T-Rex Official | 原始实现 |
+|------|----------------|----------|
+| **Per-finger量化** | ✅ 是 | ❌ 否 |
+| **Finger ID Embedding** | ✅ 是 | ❌ 否 |
+| **Magnitude-weighted Loss** | ✅ 是 | ❌ 否 |
+| **死亡码字复活** | ✅ 随机采样 | ⚠️ 简单实现 |
+| **官方验证** | ✅ 已验证 | ❌ 实验性 |
 
-## Loss Formulas
+**推荐使用**: T-Rex Official 实现
 
-**Total Loss**:
-```
-total_loss = recon_loss + vq_loss
-```
+---
 
-**Reconstruction Loss**:
-```
-recon_loss = MSE(x_recon, x_original)
-```
+## 🔧 配置文件说明
 
-**VQ Loss** (EMA mode):
-```
-vq_loss = commitment_loss
-commitment_loss = β × MSE(z_e_normalized, stop_gradient(z_q))
-```
+| 文件 | 用途 | 推荐 |
+|------|------|------|
+| `trex_2finger_config.yaml` | T-Rex双指训练配置 | ✅ 推荐 |
+| `trex_vqvae_config.yaml` | 实验性配置 | ⚠️ |
+| `vqvae_config.yaml` | 原始配置 | ⚠️ |
 
-**Codebook Update** (no gradients):
-```
-cluster_size_t = decay × cluster_size_{t-1} + (1-decay) × current_usage
-embedding_sum_t = decay × embedding_sum_{t-1} + (1-decay) × Σ(z_e_normalized)
-codebook_t = embedding_sum_t / cluster_size_t
-```
+---
 
-## Requirements
+## 📊 模型性能
 
-- PyTorch
-- OpenCV (for visualization)
-- wandb (optional, for logging)
-- LeRobot dataset format
+### T-Rex VQ-VAE (推荐)
 
-## Output
+| 指标 | 值 |
+|------|---|
+| 参数量 | 896K (0.90M) |
+| Codebook大小 | 64 |
+| 输入 | [B, 16, 2, 6] |
+| 输出 | [B, 2] (per-finger indices) |
+| 重建MSE | < 0.02 (预期) |
+| 码本利用率 | > 90% (预期) |
 
-The model outputs:
-- Discrete token indices for each force history window
-- Quantized embeddings for downstream tasks
-- Reconstruction of input force history
+---
+
+## ⚠️ 重要提示
+
+1. **优先使用T-Rex官方实现** - 已经过验证和测试
+2. **完整文档** - 所有文档在 `trex_docs/` 目录
+3. **测试先行** - 训练前先运行 `test_trex_model.py`
+4. **统计量必需** - 训练前必须先计算数据统计量
+
+---
+
+## 🔗 相关链接
+
+- **T-Rex官方仓库**: https://github.com/ZhuoyangLiu2005/T-Rex
+- **项目文档**: [trex_docs/README.md](trex_docs/README.md)
+- **快速开始**: [trex_docs/QUICKSTART_TREX.md](trex_docs/QUICKSTART_TREX.md)
+
+---
+
+## 📝 版本历史
+
+- **v1.0** (2026-08-12) - T-Rex VQ-VAE双指适配完成
+  - 提取官方源码
+  - 适配双指系统
+  - 完整测试和文档
+
+---
+
+**维护状态**: ✅ 活跃维护  
+**推荐使用**: T-Rex Official 实现  
+**文档完整度**: 100%

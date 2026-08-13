@@ -296,6 +296,48 @@ class FusionEncoder(nn.Module):
 
 
 
+class VisualTokenEncoder(nn.Module):
+    """
+    将ACT Transformer encoder输出的视觉token聚合为固定维度特征。
+
+    输入:
+        - [B, S, D] (S个视觉token，来自冻结ACT的transformer encoder输出)
+        - 或 [B, D] (已mean-pooled的视觉特征，来自离线预处理缓存)
+    输出:
+        B, output_dim
+    """
+
+    def __init__(
+        self,
+        input_dim=512,
+        output_dim=256,
+        pooling="mean",
+    ):
+        super().__init__()
+
+        if pooling not in {"mean"}:
+            raise ValueError(f"Unknown visual token pooling: {pooling!r}. Choose 'mean'.")
+        self.pooling = pooling
+
+        self.fc = nn.Linear(input_dim, output_dim)
+        self.output_norm = nn.LayerNorm(output_dim)
+
+    def forward(self, x):
+        """
+        x: [B, S, D] 视觉token序列，或 [B, D] 已pooled特征
+        """
+        if x.ndim == 3:
+            if self.pooling == "mean":
+                x = x.mean(dim=1)  # [B, D]
+        elif x.ndim != 2:
+            raise ValueError(
+                "Visual input must be [B, S, D] or [B, D], got "
+                f"{tuple(x.shape)}."
+            )
+        x = self.fc(x)
+        return torch.relu(self.output_norm(x))
+
+
 class ResidualDecoder(nn.Module):
 
     def __init__(
@@ -361,6 +403,8 @@ class TactileResidualACT(nn.Module):
         current_force_mean=None,
         current_force_std=None,
         normalize_current_force_input=False,
+        use_act_visual=False,
+        visual_encoder_cfg=None,
     ):
         """
         Args:
@@ -378,6 +422,10 @@ class TactileResidualACT(nn.Module):
         fusion_cfg = fusion_cfg or {}
         decoder_cfg = decoder_cfg or {}
         current_force_encoder_cfg = current_force_encoder_cfg or {}
+        visual_encoder_cfg = visual_encoder_cfg or {}
+
+        # 是否启用ACT视觉token输入
+        self.use_act_visual = bool(use_act_visual)
 
         # 根据配置选择触觉编码器
         if tactile_encoder_type == "force":
@@ -543,12 +591,26 @@ class TactileResidualACT(nn.Module):
         expected_fusion_input_dim = (
             tactile_output_dim + current_force_output_dim + state_output_dim + action_output_dim
         )
+
+        # ACT视觉token编码器 (可选)
+        self.visual_encoder = None
+        visual_output_dim = 0
+        if self.use_act_visual:
+            visual_output_dim = int(visual_encoder_cfg.get("output_dim", 256))
+            self.visual_encoder = VisualTokenEncoder(
+                input_dim=int(visual_encoder_cfg.get("input_dim", 512)),
+                output_dim=visual_output_dim,
+                pooling=visual_encoder_cfg.get("pooling", "mean"),
+            )
+            expected_fusion_input_dim += visual_output_dim
+
         fusion_input_dim = int(
             fusion_cfg.get("input_dim", expected_fusion_input_dim)
         )
         if fusion_input_dim != expected_fusion_input_dim:
             raise ValueError(
-                "fusion.input_dim must equal tactile + current_force + state + action feature dimensions: "
+                "fusion.input_dim must equal tactile + current_force + state + action "
+                "(+ visual if enabled) feature dimensions: "
                 f"{fusion_input_dim} vs {expected_fusion_input_dim}."
             )
         fusion_output_dim = int(fusion_cfg.get("output_dim", 256))
@@ -592,6 +654,7 @@ class TactileResidualACT(nn.Module):
         current_force,
         state,
         act_chunk,
+        act_visual_tokens=None,
         return_feature_metrics=False,
     ):
 
@@ -657,14 +720,29 @@ class TactileResidualACT(nn.Module):
             act_chunk
         )
 
+        # ACT视觉token编码 (可选)
+        visual_feature = None
+        if self.use_act_visual:
+            if act_visual_tokens is None:
+                raise ValueError(
+                    "use_act_visual=True but act_visual_tokens is None."
+                )
+            if act_visual_tokens.ndim not in (2, 3):
+                raise ValueError(
+                    "act_visual_tokens must have shape [B, S, D] or [B, D], got "
+                    f"{tuple(act_visual_tokens.shape)}."
+                )
+            visual_feature = self.visual_encoder(act_visual_tokens)
+
 
         feature=torch.cat(
             [
                 tactile_feature,
                 current_force_feature,
                 state_feature,
-                action_feature
-            ],
+                action_feature,
+            ]
+            + ([visual_feature] if visual_feature is not None else []),
             dim=-1
         )
 
@@ -680,6 +758,8 @@ class TactileResidualACT(nn.Module):
         state_dim = state_feature.shape[-1]
         action_dim = action_feature.shape[-1]
         expected_fusion_dim = tactile_dim + current_force_dim + state_dim + action_dim
+        if visual_feature is not None:
+            expected_fusion_dim += visual_feature.shape[-1]
         if fusion_input_layer.in_features != expected_fusion_dim:
             raise RuntimeError(
                 "Fusion input dimensions do not match encoded modality dimensions: "
@@ -709,10 +789,21 @@ class TactileResidualACT(nn.Module):
             action_feature,
             fusion_weight[
                 :,
-                tactile_dim + current_force_dim + state_dim:,
+                tactile_dim + current_force_dim + state_dim:
+                tactile_dim + current_force_dim + state_dim + action_dim,
             ],
         )
-        h_pre = c_t + c_cf + c_s + c_a + fusion_input_layer.bias
+        if visual_feature is not None:
+            c_v = torch.nn.functional.linear(
+                visual_feature,
+                fusion_weight[
+                    :,
+                    tactile_dim + current_force_dim + state_dim + action_dim:,
+                ],
+            )
+            h_pre = c_t + c_cf + c_s + c_a + c_v + fusion_input_layer.bias
+        else:
+            h_pre = c_t + c_cf + c_s + c_a + fusion_input_layer.bias
 
         z=self.fusion.encoder[1:](h_pre)
 
@@ -720,13 +811,16 @@ class TactileResidualACT(nn.Module):
         delta_action=self.decoder(z)
 
         if return_feature_metrics:
+            contribution_list = [
+                c_t.norm(p=2, dim=-1),
+                c_cf.norm(p=2, dim=-1),
+                c_s.norm(p=2, dim=-1),
+                c_a.norm(p=2, dim=-1),
+            ]
+            if visual_feature is not None:
+                contribution_list.append(c_v.norm(p=2, dim=-1))
             contribution_norms = torch.stack(
-                [
-                    c_t.norm(p=2, dim=-1),
-                    c_cf.norm(p=2, dim=-1),
-                    c_s.norm(p=2, dim=-1),
-                    c_a.norm(p=2, dim=-1),
-                ],
+                contribution_list,
                 dim=-1,
             )
             contribution_ratios = contribution_norms / (
@@ -750,6 +844,13 @@ class TactileResidualACT(nn.Module):
                 "state_contribution_ratio": contribution_ratios[:, 2].mean(),
                 "action_contribution_ratio": contribution_ratios[:, 3].mean(),
             }
+            if visual_feature is not None:
+                feature_metrics["visual_encoder_rms"] = (
+                    visual_feature.square().mean(dim=-1).sqrt().mean()
+                )
+                feature_metrics["visual_contribution_ratio"] = (
+                    contribution_ratios[:, 4].mean()
+                )
             # VQ-VAE模式下添加token ID
             if vqvae_token_id is not None:
                 feature_metrics["vqvae_token_id"] = vqvae_token_id

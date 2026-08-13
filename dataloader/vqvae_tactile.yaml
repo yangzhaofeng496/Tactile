@@ -1,0 +1,27 @@
+dataset:
+  repo_id: "/home/yang/TactileEncoder/dataset/so101/dm_350_400_merged"
+  root: null
+  revision: null
+  video_backend: "torchcodec"
+
+  keys:
+    tactile_type: vqvae
+    tactile_force:
+      - "observation.tactile.right_force"
+      - "observation.tactile.left_force"
+
+sequence:
+  tactile_history_force: 16  # 触觉历史窗口长度（与 vqvae_config 的 history_steps=16 一致）
+  pad_value: 0.0
+
+split:
+  train: 0.9  # Use 90% for training
+  val: 0.1    # Use 10% for validation
+  test: 0.0
+  seed: 42
+
+loader:
+  batch_size: 16
+  shuffle: true
+  num_workers: 8
+  drop_last: false

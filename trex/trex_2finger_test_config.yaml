@@ -1,0 +1,45 @@
+# Test configuration for T-Rex VQ-VAE (2-finger system)
+# Quick test with minimal epochs for validation
+
+model:
+  n_fingers: 2
+  per_finger_dim: 6
+  window: 16
+
+  # Encoder/Decoder architecture
+  hidden_channels: 128
+  bottleneck_channels: 256
+  embed_dim: 256
+  n_strided_blocks: 2
+
+  # VQ-VAE parameters
+  codebook_size: 64
+  commitment_weight: 0.25
+  decay: 0.99
+
+  # Dead code revival
+  revive_freq: 100
+  revive_threshold: 0.01
+
+  # Magnitude-weighted reconstruction loss
+  use_magnitude_weight: true
+  weight_alpha: 0.5
+  weight_tau: 1.0
+
+  # Granularity: finger (per-finger) or hand (full)
+  granularity: finger
+
+  # Codebook initialization
+  init_mode: uniform  # uniform, first_batch, or kmeans
+
+train:
+  epochs: 3  # Just 3 epochs for quick test
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  warmup_steps: 500
+  min_lr_ratio: 0.1
+  grad_clip: 1.0
+
+  # Logging
+  log_every: 50
+  save_every_epoch: 1

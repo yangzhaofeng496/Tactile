@@ -13,6 +13,44 @@ def load_config(config_path):
     return config
 
 
+def load_model_checkpoint(checkpoint_path, device="cuda"):
+    """
+    从checkpoint加载模型
+
+    Args:
+        checkpoint_path: checkpoint文件路径
+        device: 模型加载设备
+
+    Returns:
+        dict: {"model": 模型实例}
+    """
+    checkpoint_path = Path(checkpoint_path)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location=device,
+        weights_only=False,
+    )
+
+    config_snapshot = checkpoint.get("config")
+    if isinstance(config_snapshot, dict) and "model_config" in config_snapshot:
+        config_snapshot = config_snapshot["model_config"]
+    if config_snapshot is None:
+        config_snapshot = load_config(
+            str(Path(__file__).parent / "config" / "model_config.yaml")
+        )
+
+    model, _ = create_model_from_config_dict(config_snapshot)
+
+    model.load_state_dict(checkpoint["model"])
+    model = model.to(device)
+    model.eval()
+
+    return {"model": model}
+
+
 def create_model_from_config(config_path):
     """
     从配置文件创建模型
@@ -25,7 +63,20 @@ def create_model_from_config(config_path):
         config: 配置字典
     """
     config = load_config(config_path)
+    return create_model_from_config_dict(config)
 
+
+def create_model_from_config_dict(config):
+    """
+    从配置字典创建模型
+
+    Args:
+        config: 配置字典
+
+    Returns:
+        model: TactileResidualACT 模型实例
+        config: 配置字典
+    """
     # 获取触觉编码器类型
     encoder_type = config['tactile_encoder']['type']
     action_horizon = int(config['decoder']['action_horizon'])
@@ -71,6 +122,7 @@ def create_model_from_config(config_path):
         action_dim=action_dim,
         tactile_encoder_cfg=encoder_config,
         state_encoder_cfg=config.get('state_encoder'),
+        current_force_encoder_cfg=config.get('current_force_encoder'),
         action_encoder_cfg=config.get('action_encoder'),
         fusion_cfg=config.get('fusion'),
         decoder_cfg=config.get('decoder'),
@@ -86,6 +138,10 @@ def create_model_from_config(config_path):
         normalize_state_input=bool(
             state_config.get('normalize_input', True)
         ),
+        use_act_visual=bool(
+            config.get('act_visual', {}).get('enabled', False)
+        ),
+        visual_encoder_cfg=config.get('act_visual'),
     )
 
     return model, config

@@ -1,16 +1,31 @@
 dataset:
-  repo_id: "/home/yang/TactileEncoder/dataset/so101/eval_act_350_slow_805_clean"
+  repo_id: "/home/yang/TactileEncoder/dataset/so101/dm_350"
   root: null
   revision: null
   video_backend: "torchcodec"
 
   keys:
-    tactile_type: "force"
+    tactile_type: "vqvae"
 
     # 历史力数据（VQ-VAE编码器输入）
     tactile_force:
       - "observation.tactile.left_force"
       - "observation.tactile.right_force"
+
+    # 触觉通道顺序（需与model_config和stats文件一致）
+    tactile_force_channel_order:
+      - left_Fx
+      - left_Fy
+      - left_Fz
+      - left_Mx
+      - left_My
+      - left_Mz
+      - right_Fx
+      - right_Fy
+      - right_Fz
+      - right_Mx
+      - right_My
+      - right_Mz
 
     # 当前力数据（CurrentForceEncoder输入）
     current_force:
@@ -26,19 +41,26 @@ dataset:
   # ACT策略使用的观测字段
   act_observation_keys:
     - "observation.state"
-    # - "observation.images.realsense"
-    # - "observation.images.wrist_cam"
+    - "observation.images.wrist_cam"
+    - "observation.images.top"
+    - "observation.images.side"
 
 sequence:
-  tactile_history_force: 30  # 历史力时间步数
+  tactile_history_force: 16  # 历史力时间步数（需与VQ-VAE的history_steps=16一致）
   action_horizon: 30         # 动作预测时间步数
 
 policy:
   type: "act"
-  pretrained_path: "/home/yang/TactileEncoder/actmodel/dm_act_orin_fail/so101/dm_act_orin_fail/checkpoints/100000"
+  pretrained_path: "/home/yang/TactileEncoder/actmodel/dm/dm_act_orin_350_reinforce/checkpoints/100000"
   revision: null
   device: "cuda"
   use_postprocessor: true
+  # 开启后从冻结ACT的transformer encoder输出中提取视觉token，
+  # 输入残差网络一起训练（需同时开启config/model_config.yaml中act_visual.enabled）。
+  use_act_visual: true
+  # 离线预处理缓存：设置后训练直接从缓存读取act_chunk/act_visual，不再实时运行ACT。
+  # 生成方式: python dataloader/preprocess_act_cache.py --config dataloader/tactile_dataloader.yaml
+  act_cache_path: "/home/yang/TactileEncoder/outputs/act_cache/act_cache.pt"
 
 split:
   train: 0.70

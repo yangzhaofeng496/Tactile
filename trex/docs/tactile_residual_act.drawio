@@ -1,0 +1,187 @@
+<mxfile host="65bd71144e">
+    <diagram name="TactileResidualACT Architecture" id="residual_act_architecture">
+        <mxGraphModel dx="1285" dy="831" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2800" pageHeight="1200" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="title" value="TactileResidualACT: 编码器 → 融合 → 解码器 架构" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=24;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="760" y="30" width="900" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="stage1" value="输入数据" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=16;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="30" y="100" width="220" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="input_tactile" value="触觉历史&#xa;force / vqvae: [B, T, 12]&#xa;image: [B, T, 6, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="180" width="190" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="input_current_force" value="当前力&#xa;[B, 12]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="320" width="190" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="input_state" value="机器人状态&#xa;[B, 6]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="450" width="190" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="input_action" value="ACT 动作块&#xa;[B, 30, 6]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="580" width="190" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="input_visual" value="ACT 视觉 tokens (可选)&#xa;[B, S, 512]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;dashed=1;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="710" width="190" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="stage2" value="编码器 (Encoders)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=16;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="350" y="100" width="360" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="tactile_box" value="Tactile Encoder" style="swimlane;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="290" y="150" width="420" height="240" as="geometry"/>
+                </mxCell>
+                <mxCell id="tactile_norm" value="可选输入归一化: Z-score by channel" style="text;html=1;strokeColor=none;fillColor=#ffe6cc;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=1;fontSize=11;fontStyle=1" parent="tactile_box" vertex="1">
+                    <mxGeometry x="20" y="35" width="380" height="28" as="geometry"/>
+                </mxCell>
+                <mxCell id="tactile_force" value="force 分支: TactileForceEncoder&#xa;Conv1d stack + pool + fc → [B, 512]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" parent="tactile_box" vertex="1">
+                    <mxGeometry x="20" y="75" width="380" height="42" as="geometry"/>
+                </mxCell>
+                <mxCell id="tactile_image" value="image 分支: TactileImageEncoder&#xa;Conv2d stack + temporal mean → [B, 256]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" parent="tactile_box" vertex="1">
+                    <mxGeometry x="20" y="122" width="380" height="42" as="geometry"/>
+                </mxCell>
+                <mxCell id="tactile_vq" value="vqvae 分支: 冻结的 VQVAEForceEncoder&#xa;encode(x) → codebook 向量 [B, 512] (+ token id)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" parent="tactile_box" vertex="1">
+                    <mxGeometry x="20" y="169" width="380" height="46" as="geometry"/>
+                </mxCell>
+                <mxCell id="current_force_box" value="CurrentForceEncoder" style="swimlane;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=13;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="290" y="420" width="420" height="130" as="geometry"/>
+                </mxCell>
+                <mxCell id="current_force_norm" value="可选输入归一化" style="text;html=1;strokeColor=none;fillColor=#fff2cc;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=1;fontSize=11;fontStyle=1" parent="current_force_box" vertex="1">
+                    <mxGeometry x="20" y="35" width="380" height="24" as="geometry"/>
+                </mxCell>
+                <mxCell id="current_force_layers" value="Linear(12→64) + ReLU&#xa;Linear(64→128) + LayerNorm + ReLU&#xa;输出: [B, 128]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" parent="current_force_box" vertex="1">
+                    <mxGeometry x="20" y="68" width="380" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="state_box" value="StateEncoder" style="swimlane;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="290" y="580" width="420" height="120" as="geometry"/>
+                </mxCell>
+                <mxCell id="state_norm" value="可选输入归一化" style="text;html=1;strokeColor=none;fillColor=#fff2cc;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=1;fontSize=11;fontStyle=1" parent="state_box" vertex="1">
+                    <mxGeometry x="20" y="35" width="380" height="24" as="geometry"/>
+                </mxCell>
+                <mxCell id="state_layers" value="Linear(6→128) + ReLU&#xa;Linear(128→128) + LayerNorm + ReLU&#xa;输出: [B, 128]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" parent="state_box" vertex="1">
+                    <mxGeometry x="20" y="66" width="380" height="44" as="geometry"/>
+                </mxCell>
+                <mxCell id="action_box" value="ActionEncoder" style="swimlane;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="290" y="730" width="420" height="140" as="geometry"/>
+                </mxCell>
+                <mxCell id="action_reshape" value="Flatten: [B, 30, 6] → [B, 180]" style="text;html=1;strokeColor=none;fillColor=#ffe6cc;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=1;fontSize=11;fontStyle=1" parent="action_box" vertex="1">
+                    <mxGeometry x="20" y="35" width="380" height="24" as="geometry"/>
+                </mxCell>
+                <mxCell id="action_layers" value="Linear(180→128) + ReLU&#xa;Linear(128→256) + LayerNorm + ReLU&#xa;输出: [B, 256]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" parent="action_box" vertex="1">
+                    <mxGeometry x="20" y="70" width="380" height="48" as="geometry"/>
+                </mxCell>
+                <mxCell id="visual_box" value="VisualTokenEncoder (可选)" style="swimlane;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=13;fontStyle=1;dashed=1;" parent="1" vertex="1">
+                    <mxGeometry x="290" y="900" width="420" height="120" as="geometry"/>
+                </mxCell>
+                <mxCell id="visual_layers" value="Mean pooling over tokens&#xa;Linear(512→256) + LayerNorm + ReLU&#xa;输出: [B, 256]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=11;" parent="visual_box" vertex="1">
+                    <mxGeometry x="20" y="42" width="380" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="stage3" value="融合 (Fusion)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=16;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="840" y="100" width="320" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="fusion_box" value="FusionEncoder" style="swimlane;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="800" y="330" width="430" height="320" as="geometry"/>
+                </mxCell>
+                <mxCell id="fusion_concat" value="特征拼接&#xa;tactile + current_force + state + action (+ visual)&#xa;默认 vqvae 配置: 512 + 128 + 128 + 256 = 1024" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;fontStyle=1" parent="fusion_box" vertex="1">
+                    <mxGeometry x="20" y="35" width="390" height="64" as="geometry"/>
+                </mxCell>
+                <mxCell id="fusion_contrib" value="代码中显式分解第一层贡献&#xa;c_t, c_cf, c_s, c_a, (c_v)&#xa;h_pre = 各模态线性贡献之和 + bias" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" parent="fusion_box" vertex="1">
+                    <mxGeometry x="20" y="112" width="390" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="fusion_fc1" value="Linear(input_dim→512) + ReLU&#xa;输出中间特征 [B, 512]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" parent="fusion_box" vertex="1">
+                    <mxGeometry x="20" y="194" width="390" height="48" as="geometry"/>
+                </mxCell>
+                <mxCell id="fusion_fc2" value="Linear(512→256) + ReLU&#xa;融合特征 z: [B, 256]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;fontStyle=1" parent="fusion_box" vertex="1">
+                    <mxGeometry x="20" y="255" width="390" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="stage4" value="解码器 (Decoder)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=16;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="1360" y="100" width="320" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="decoder_box" value="ResidualDecoder" style="swimlane;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=13;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="1320" y="360" width="400" height="220" as="geometry"/>
+                </mxCell>
+                <mxCell id="decoder_fc1" value="Linear(256→256) + ReLU" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" parent="decoder_box" vertex="1">
+                    <mxGeometry x="20" y="40" width="360" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="decoder_fc2" value="Linear(256→180)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" parent="decoder_box" vertex="1">
+                    <mxGeometry x="20" y="90" width="360" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="decoder_out" value="Reshape: [B, 180] → [B, 30, 6]&#xa;预测残差动作 Δpred" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;fontStyle=1" parent="decoder_box" vertex="1">
+                    <mxGeometry x="20" y="145" width="360" height="55" as="geometry"/>
+                </mxCell>
+                <mxCell id="stage5" value="输出 &amp; 损失" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=16;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="1850" y="100" width="360" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="output_box" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;dashed=1;" parent="1" vertex="1">
+                    <mxGeometry x="1790" y="320" width="470" height="310" as="geometry"/>
+                </mxCell>
+                <mxCell id="pred_delta" value="预测残差 Δpred&#xa;[B, 30, 6]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="1820" y="350" width="150" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="expert_action" value="专家动作&#xa;[B, 30, 6]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" parent="1" vertex="1">
+                    <mxGeometry x="1990" y="350" width="150" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="act_chunk_ref" value="ACT 动作块&#xa;[B, 30, 6]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;" parent="1" vertex="1">
+                    <mxGeometry x="1820" y="430" width="150" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="loss_formula" value="目标残差: Δtarget = expert_action - act_chunk&lt;br&gt;损失: weighted SmoothL1(Δpred, Δtarget)&lt;br&gt;weight = clamp(1 + alpha * ||expert - act||, 1, weight_max)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;align=left;verticalAlign=middle;" parent="1" vertex="1">
+                    <mxGeometry x="1820" y="510" width="400" height="84" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend_box" value="图例" style="swimlane;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=14;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="1830" y="700" width="240" height="210" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend1" value="触觉 / VQ-VAE 相关" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" parent="legend_box" vertex="1">
+                    <mxGeometry x="15" y="35" width="210" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend2" value="当前力 / 输出相关" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" parent="legend_box" vertex="1">
+                    <mxGeometry x="15" y="65" width="210" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend3" value="状态相关" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" parent="legend_box" vertex="1">
+                    <mxGeometry x="15" y="95" width="210" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend4" value="动作相关" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" parent="legend_box" vertex="1">
+                    <mxGeometry x="15" y="125" width="210" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend5" value="融合模块" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" parent="legend_box" vertex="1">
+                    <mxGeometry x="15" y="155" width="210" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#d6b656;" parent="1" source="input_tactile" target="tactile_box" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#d79b00;" parent="1" source="input_current_force" target="current_force_box" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#82b366;" parent="1" source="input_state" target="state_box" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#b85450;" parent="1" source="input_action" target="action_box" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#666666;dashed=1;" parent="1" source="input_visual" target="visual_box" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#9673a6;" parent="1" source="tactile_box" target="fusion_box" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#d79b00;" parent="1" source="current_force_box" target="fusion_box" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#82b366;" parent="1" source="state_box" target="fusion_box" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#b85450;" parent="1" source="action_box" target="fusion_box" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#666666;dashed=1;" parent="1" source="visual_box" target="fusion_box" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e11" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=3;strokeColor=#6c8ebf;" parent="1" source="fusion_box" target="decoder_box" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e12" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#d79b00;" parent="1" source="decoder_box" target="pred_delta" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>

@@ -3,34 +3,49 @@
 model:
   # 输入维度配置
   input:
-    history_steps: 15          # 历史步数 T
-    force_dim: 12              # 力的维度（12维：左右各6个传感器）
+    history_steps: 16          # 历史步数 T（T-Rex 默认窗口长度，与转置卷积镜像结构精确匹配）
+    force_dim: 12              # 力的维度（12维：双手各6个传感器）
 
-  # 编码器配置
+  # 编码器配置（T-Rex 风格：Conv1d + GroupNorm + GELU + stride 下采样）
   encoder:
-    conv1_in: 12               # 第一层卷积输入通道（对应force_dim）
-    conv1_out: 64              # 第一层卷积输出通道
-    conv1_kernel: 3            # 第一层卷积核大小
-
-    conv2_in: 64               # 第二层卷积输入通道
-    conv2_out: 128             # 第二层卷积输出通道
-    conv2_kernel: 3            # 第二层卷积核大小
-
-    fc_out: 256                # 全连接层输出维度（embedding dim）
+    hidden_channels: 128       # stem / 中间隐藏通道数
+    bottleneck_channels: 256   # 最深层瓶颈通道数
+    n_strided_blocks: 2        # stride=2 下采样块数（16 -> 8 -> 4，解码器精确镜像无填充）
+    n_extra_blocks: 0          # 额外 stride=1 深度卷积块数（编码器+解码器对称加深，0=不加深）
+    kernel_size: 5             # 卷积核大小
+    num_groups: 8              # GroupNorm 分组数
 
   # Vector Quantizer 配置
   quantizer:
     num_embeddings: 16         # codebook大小（离散token数量）
-    embedding_dim: 256         # embedding维度
-    commitment_cost: 500.0     # commitment loss的权重 beta
-    ema_decay: 0.9             # EMA decay rate
+    embedding_dim: 512         # embedding维度
+    commitment_cost: 1.0     # commitment loss的权重 beta
+    ema_decay: 0.99             # EMA decay rate
     ema_epsilon: 0.00001       # EMA numerical stability constant
+
+    # Codebook initialization strategy
+    init_strategy: first_batch # Options: first_batch, kmeans, random
+    init_eps: 1.0e-5           # Small noise for duplicate prevention
+    kmeans_init_samples: 4096  # Number of samples to collect for k-means
+    kmeans_iterations: 20      # K-means iteration count
 
   # 解码器配置
   decoder:
-    fc1_in: 256                # 第一层全连接输入维度
+    # 解码器类型：
+    #   mirror: 与编码器镜像的转置卷积上采样结构（T-Rex 风格，参数从 encoder 自动推导）
+    #   mlp:    原始 MLP 解码器（fc1 + fc2，需配置下方 mlp 参数）
+    type: mirror
+
+    # type: mlp 时使用以下参数
+    fc1_in: 512                # 第一层全连接输入维度
     fc1_out: 128               # 第一层全连接输出维度
-    fc2_out: 180               # 第二层全连接输出维度（history_steps * force_dim = 15*12）
+    fc2_out: 192               # 第二层全连接输出维度（history_steps * force_dim = 16*12）
+
+  # T-Rex 风格 magnitude 加权重建损失
+  # 强接触窗口(力度大)损失权重更高，模型优先重建有信息量的片段
+  use_magnitude_weight: true   # true=开启, false=关闭(普通MSE)
+  weight_alpha: 4.0            # 最大额外权重(强接触窗口权重上限 1+alpha)
+  weight_tau: 150.0            # 力度尺度，需匹配本数据集的典型magnitude量级
 
 loss:
   # 重建损失权重
@@ -44,7 +59,7 @@ loss:
 
 training:
   # batch size
-  batch_size: 32
+  batch_size: 16
 
   # AdamW 学习率
   learning_rate: 0.00003
@@ -53,7 +68,7 @@ training:
   weight_decay: 0.00001
 
   # 训练轮数
-  num_epochs: 100
+  num_epochs: 1000
 
   # DataLoader worker 数
   num_workers: 8
@@ -68,7 +83,7 @@ training:
   wandb_log_every: 10
 
   # checkpoint 保存目录
-  save_dir: TactileSelfencoder/vqvae_checkpoints/50_16tokens_resume
+  save_dir: TactileSelfencoder/vqvae_checkpoints/decoder_mirror/16tokens_mirror
 
   # 每多少个epoch保存一次checkpoint
   save_every: 5
@@ -79,6 +94,9 @@ training:
   # 聚类可视化设置
   clustering_viz_interval: 100  # 每100个batch生成一次聚类可视化
   clustering_viz_max_samples: 1000  # 每次可视化最多使用1000个样本
+
+  # 是否将聚类图保存到本地（save_dir/clustering/，含交互式3D HTML）
+  save_local_plots: true
 
 wandb:
   # 是否启用 wandb
@@ -91,21 +109,16 @@ wandb:
   run_name: ""
 
 data:
-  # 数据来源：使用与主训练脚本相同的dataloader
-  dataloader_config: dataloader/tactile_dataloader.yaml
-
-  # 使用的数据划分
-  split:
-    train: 0.80
-    val: 0.1
-    test: 0.1
-    seed: 42
+  # 数据来源：VQ-VAE专用dataloader（仅力传感器）
+  dataloader_config: dataloader/vqvae_tactile.yaml
 
 # Dead code replacement configuration
-dead_code_replacement: 
+dead_code_replacement:
   enabled: true              # Toggle on/off
   usage_decay: 0.90          # EMA decay for usage tracking (slower than codebook EMA)
   dead_threshold: 1.0        # Below this = dead code
-  dead_patience:  100        # Steps before marking as dead
-  check_interval: 246        # Check every N steps
-  reset_interval: 369        # Reset dead codes every N steps
+  dead_patience:  1000        # Steps before marking as dead
+  check_interval: 100        # Check every N steps
+  reset_interval: 500        # Reset dead codes every N steps
+  reset_count: 1.0           # Initial cluster size for reset codes
+  reset_noise_scale: 1.0e-4  # Noise scale when reusing samples

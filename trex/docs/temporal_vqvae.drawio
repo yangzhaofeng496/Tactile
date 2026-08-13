@@ -1,0 +1,163 @@
+<mxfile host="65bd71144e">
+    <diagram name="TemporalVQVAE Architecture" id="temporal_vqvae_architecture">
+        <mxGraphModel dx="1285" dy="831" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="3000" pageHeight="1200" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="title" value="TemporalVQVAE: 编码器 → 向量量化 → 解码器 架构" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=24;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="860" y="30" width="980" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="stage1" value="输入数据" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=16;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="40" y="100" width="200" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="vq_input" value="触觉力历史&#xa;x: [B, 16, 12]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="230" width="180" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="vq_mag" value="原始力度 magnitude (可选)&#xa;[B]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;dashed=1;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="390" width="180" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="stage2" value="编码器 (TRexEncoder)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=16;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="320" y="100" width="420" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="encoder_box" value="TRexEncoder" style="swimlane;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="280" y="160" width="450" height="360" as="geometry"/>
+                </mxCell>
+                <mxCell id="enc_transpose" value="Transpose: [B, 16, 12] → [B, 12, 16]" style="text;html=1;strokeColor=none;fillColor=#ffe6cc;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=1;fontSize=11;fontStyle=1" parent="encoder_box" vertex="1">
+                    <mxGeometry x="20" y="35" width="410" height="28" as="geometry"/>
+                </mxCell>
+                <mxCell id="enc_stem" value="Stem: Conv1d(12→128, k=5, s=1)&#xa;GroupNorm + GELU → [B, 128, 16]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" parent="encoder_box" vertex="1">
+                    <mxGeometry x="20" y="76" width="410" height="44" as="geometry"/>
+                </mxCell>
+                <mxCell id="enc_extra" value="Extra depth blocks (n_extra_blocks)&#xa;默认配置为 0" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=11;dashed=1;" parent="encoder_box" vertex="1">
+                    <mxGeometry x="20" y="128" width="410" height="38" as="geometry"/>
+                </mxCell>
+                <mxCell id="enc_s1" value="Strided block 1: Conv1d(128→128, k=5, s=2)&#xa;GroupNorm + GELU → [B, 128, 8]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" parent="encoder_box" vertex="1">
+                    <mxGeometry x="20" y="176" width="410" height="44" as="geometry"/>
+                </mxCell>
+                <mxCell id="enc_s2" value="Strided block 2: Conv1d(128→256, k=5, s=2)&#xa;GroupNorm + GELU → [B, 256, 4]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" parent="encoder_box" vertex="1">
+                    <mxGeometry x="20" y="228" width="410" height="44" as="geometry"/>
+                </mxCell>
+                <mxCell id="enc_proj" value="Projection: Conv1d(256→512, k=3)&#xa;Mean pool over time → z_e [B, 512]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;fontStyle=1" parent="encoder_box" vertex="1">
+                    <mxGeometry x="20" y="282" width="410" height="48" as="geometry"/>
+                </mxCell>
+                <mxCell id="stage3" value="向量量化 (Quantizer)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=16;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="840" y="100" width="360" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="quantizer_box" value="VectorQuantizer (EMA)" style="swimlane;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="800" y="180" width="430" height="320" as="geometry"/>
+                </mxCell>
+                <mxCell id="rmsnorm" value="RMSNorm(z_e) → z_e_normalized [B, 512]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" parent="quantizer_box" vertex="1">
+                    <mxGeometry x="20" y="35" width="390" height="34" as="geometry"/>
+                </mxCell>
+                <mxCell id="q_lookup" value="计算到 codebook 的 L2 距离&#xa;选择最近 token index" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" parent="quantizer_box" vertex="1">
+                    <mxGeometry x="20" y="82" width="390" height="42" as="geometry"/>
+                </mxCell>
+                <mxCell id="q_codebook" value="Codebook: K = 16, D = 512&#xa;EMA 更新 embedding / cluster_size / embedding_sum" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=11;" parent="quantizer_box" vertex="1">
+                    <mxGeometry x="20" y="132" width="390" height="48" as="geometry"/>
+                </mxCell>
+                <mxCell id="q_dead" value="Dead code replacement&#xa;usage tracking / reset_interval / dead_threshold" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=11;" parent="quantizer_box" vertex="1">
+                    <mxGeometry x="20" y="188" width="390" height="42" as="geometry"/>
+                </mxCell>
+                <mxCell id="q_out" value="输出: indices [B] + z_q [B, 512]&#xa;Straight-through estimator" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;fontStyle=1" parent="quantizer_box" vertex="1">
+                    <mxGeometry x="20" y="240" width="390" height="48" as="geometry"/>
+                </mxCell>
+                <mxCell id="stage4" value="解码器 (TRexDecoder)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=16;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="1350" y="100" width="420" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="decoder_box" value="TRexDecoder" style="swimlane;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="1300" y="160" width="470" height="380" as="geometry"/>
+                </mxCell>
+                <mxCell id="dec_expand" value="Expand z_q over bottleneck time&#xa;[B, 512] → [B, 512, 4]" style="text;html=1;strokeColor=none;fillColor=#ffe6cc;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=1;fontSize=11;fontStyle=1" parent="decoder_box" vertex="1">
+                    <mxGeometry x="20" y="35" width="430" height="28" as="geometry"/>
+                </mxCell>
+                <mxCell id="dec_from_embed" value="from_embed: Conv1d(512→256, k=3)&#xa;→ [B, 256, 4]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" parent="decoder_box" vertex="1">
+                    <mxGeometry x="20" y="76" width="430" height="42" as="geometry"/>
+                </mxCell>
+                <mxCell id="dec_up1" value="Up block 1: ConvTranspose1d(256→128, k=5, s=2)&#xa;GroupNorm + GELU → [B, 128, 8]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" parent="decoder_box" vertex="1">
+                    <mxGeometry x="20" y="128" width="430" height="44" as="geometry"/>
+                </mxCell>
+                <mxCell id="dec_up2" value="Up block 2: ConvTranspose1d(128→128, k=5, s=2)&#xa;GroupNorm + GELU → [B, 128, 16]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" parent="decoder_box" vertex="1">
+                    <mxGeometry x="20" y="180" width="430" height="44" as="geometry"/>
+                </mxCell>
+                <mxCell id="dec_extra" value="Extra mirror blocks (n_extra_blocks)&#xa;默认配置为 0" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=11;dashed=1;" parent="decoder_box" vertex="1">
+                    <mxGeometry x="20" y="232" width="430" height="38" as="geometry"/>
+                </mxCell>
+                <mxCell id="dec_head" value="Head: Conv1d(128→12, k=5)&#xa;Transpose back → x_recon [B, 16, 12]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontStyle=1" parent="decoder_box" vertex="1">
+                    <mxGeometry x="20" y="282" width="430" height="48" as="geometry"/>
+                </mxCell>
+                <mxCell id="stage5" value="输出 &amp; 损失" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=16;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="1910" y="100" width="360" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="output_box" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;dashed=1;" parent="1" vertex="1">
+                    <mxGeometry x="1850" y="200" width="520" height="360" as="geometry"/>
+                </mxCell>
+                <mxCell id="out_indices" value="离散 token indices&#xa;[B]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" parent="1" vertex="1">
+                    <mxGeometry x="1880" y="230" width="160" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="out_recon" value="重建输出 x_recon&#xa;[B, 16, 12]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="2060" y="230" width="160" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="loss_recon" value="重建损失&#xa;普通 MSE 或 magnitude-weighted MSE" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" parent="1" vertex="1">
+                    <mxGeometry x="1880" y="320" width="340" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="loss_vq" value="VQ loss&#xa;commitment_cost * MSE(z_e_norm, z_q)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" parent="1" vertex="1">
+                    <mxGeometry x="1880" y="400" width="340" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="loss_total" value="总损失&#xa;total_loss = recon_loss + vq_loss" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="1880" y="480" width="340" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend_box" value="图例" style="swimlane;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=14;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="1880" y="650" width="240" height="210" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend1" value="输入 / 权重相关" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" parent="legend_box" vertex="1">
+                    <mxGeometry x="15" y="35" width="210" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend2" value="编码器" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" parent="legend_box" vertex="1">
+                    <mxGeometry x="15" y="65" width="210" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend3" value="量化器" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" parent="legend_box" vertex="1">
+                    <mxGeometry x="15" y="95" width="210" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend4" value="解码器" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" parent="legend_box" vertex="1">
+                    <mxGeometry x="15" y="125" width="210" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend5" value="损失 / 输出" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" parent="legend_box" vertex="1">
+                    <mxGeometry x="15" y="155" width="210" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#d6b656;" parent="1" source="vq_input" target="encoder_box" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#9673a6;" parent="1" source="encoder_box" target="quantizer_box" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=3;strokeColor=#6c8ebf;" parent="1" source="quantizer_box" target="decoder_box" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#6c8ebf;" parent="1" source="quantizer_box" target="out_indices" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#82b366;" parent="1" source="decoder_box" target="out_recon" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#d79b00;dashed=1;" parent="1" source="vq_input" target="loss_recon" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#d79b00;dashed=1;" parent="1" source="vq_mag" target="loss_recon" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#82b366;dashed=1;" parent="1" source="out_recon" target="loss_recon" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#6c8ebf;dashed=1;" parent="1" source="quantizer_box" target="loss_vq" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#b85450;" parent="1" source="loss_recon" target="loss_total" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e11" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#b85450;" parent="1" source="loss_vq" target="loss_total" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>

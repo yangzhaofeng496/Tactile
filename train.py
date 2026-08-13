@@ -51,29 +51,48 @@ def log_compact_wandb_metrics(step, metrics):
     if wandb.run is None:
         return
 
-    payload = {
-        "train/weight_loss": float(metrics["weighted_loss"]),
-        "train/unweight_loss": float(metrics["unweighted_loss"]),
-        "train/encoder_rms/action": float(metrics["action_encoder_rms"]),
-        "train/encoder_rms/tactile": float(metrics["tactile_encoder_rms"]),
-        "train/encoder_rms/state": float(metrics["state_encoder_rms"]),
-        "train/modality_contribution/action": float(
-            metrics["action_contribution_ratio"]
-        ),
-        "train/modality_contribution/tactile": float(
-            metrics["tactile_contribution_ratio"]
-        ),
-        "train/modality_contribution/state": float(
-            metrics["state_contribution_ratio"]
-        ),
-    }
+    payload = {}
+
+    # Objective loss
+    if "objective_loss" in metrics:
+        payload["train/objective_loss"] = float(metrics["objective_loss"])
+
+    # 只在指标存在时才添加
+    if "weighted_loss" in metrics:
+        payload["train/weight_loss"] = float(metrics["weighted_loss"])
+    if "unweighted_loss" in metrics:
+        payload["train/unweight_loss"] = float(metrics["unweighted_loss"])
+
+    # Modality contribution
+    if "action_contribution_ratio" in metrics:
+        payload["train/modality_contribution/action"] = float(metrics["action_contribution_ratio"])
+    if "tactile_contribution_ratio" in metrics:
+        payload["train/modality_contribution/tactile"] = float(metrics["tactile_contribution_ratio"])
+    if "state_contribution_ratio" in metrics:
+        payload["train/modality_contribution/state"] = float(metrics["state_contribution_ratio"])
+    if "current_force_contribution_ratio" in metrics:
+        payload["train/modality_contribution/current_force"] = float(metrics["current_force_contribution_ratio"])
+
+    # VQ-VAE token ID - 统计每个token ID的出现次数
+    if "vqvae_token_id" in metrics:
+        token_id = metrics["vqvae_token_id"]
+        if isinstance(token_id, torch.Tensor):
+            # 统计每个token ID的出现次数
+            unique_ids, counts = torch.unique(token_id, return_counts=True)
+            for token_id_val, count in zip(unique_ids.cpu().tolist(), counts.cpu().tolist()):
+                payload[f"train/vqvae_token_id/token_{token_id_val}"] = int(count)
+
+    # Action dimension MSE
     for action_dim in range(6):
-        payload[f"train/action_dim_mse/axis_{action_dim}"] = float(
-            metrics[f"action_dim{action_dim}_mse"]
-        )
-        payload[f"train/delta_action/axis_{action_dim}"] = float(
-            metrics[f"pred_delta_dim{action_dim}_mean"]
-        )
+        key = f"action_dim{action_dim}_mse"
+        if key in metrics:
+            payload[f"train/action_dim_mse/axis_{action_dim}"] = float(metrics[key])
+
+    # Delta action means
+    for action_dim in range(6):
+        key = f"pred_delta_dim{action_dim}_mean"
+        if key in metrics:
+            payload[f"train/delta_action/axis_{action_dim}"] = float(metrics[key])
 
     wandb.log(payload, step=int(step))
 
@@ -113,6 +132,7 @@ def move_batch_to_device(batch, device):
         "act_chunk",
         "expert_action",
         "delta_action_target",
+        "act_visual_tokens",
     ]
     output = dict(batch)
     for key in keys:
@@ -128,6 +148,7 @@ def move_batch_to_device(batch, device):
 def init_metric_accumulator():
     return {
         "count": 0,
+        "objective_loss_sum": 0.0,
         "weighted_loss_sum": 0.0,
         "unweighted_loss_sum": 0.0,
         "tactile_magnitude_mean_sum": 0.0,
@@ -196,7 +217,13 @@ def update_metric_accumulator(accumulator, metrics, batch_size):
         if key == "count":
             continue
         metric_name = key[:-4]
-        accumulator[key] += float(metrics[metric_name]) * batch_size
+        # 只累加实际存在的指标，且跳过tensor类型（如vqvae_token_id）
+        if metric_name in metrics:
+            value = metrics[metric_name]
+            # 跳过多元素tensor（如vqvae_token_id batch）
+            if isinstance(value, torch.Tensor) and value.numel() > 1:
+                continue
+            accumulator[key] += float(value) * batch_size
 
 
 def finalize_metric_accumulator(accumulator):
@@ -392,10 +419,17 @@ def load_and_validate_state_stats(model_config, action_dim):
 
 
 def summarize_batch_metrics(metrics):
-    return {
-        key: float(value.detach().to(torch.float32).item())
-        for key, value in metrics.items()
-    }
+    result = {}
+    for key, value in metrics.items():
+        if isinstance(value, torch.Tensor):
+            # 对于多元素tensor（如vqvae_token_id），保留为tensor
+            if value.numel() > 1:
+                result[key] = value.detach()
+            else:
+                result[key] = float(value.detach().to(torch.float32).item())
+        else:
+            result[key] = value
+    return result
 
 
 def compute_grad_norm(parameters):
@@ -536,9 +570,11 @@ def compute_losses(
     reference_dropout=0.5,
 ):
     tactile_history = batch["tactile_history"]
+    current_force = batch["current_force"]
     state = batch["observation.state"]
     act_chunk = batch["act_chunk"]
     expert_action = batch["expert_action"]
+    act_visual_tokens = batch.get("act_visual_tokens")
 
     # 数据增强：以reference_dropout概率分别独立地将state和action置零
     if model.training and reference_dropout > 0:
@@ -548,11 +584,16 @@ def compute_losses(
         # action以reference_dropout概率置零
         if torch.rand(1).item() < reference_dropout:
             act_chunk = torch.zeros_like(act_chunk)
+            # ACT视觉token与act_chunk同源，一起置零
+            if act_visual_tokens is not None:
+                act_visual_tokens = torch.zeros_like(act_visual_tokens)
 
     pred_delta, feature_metrics = model(
         tactile_history,
+        current_force,
         state,
         act_chunk,
+        act_visual_tokens=act_visual_tokens,
         return_feature_metrics=True,
     )
     target_delta = compute_target_delta(
@@ -566,15 +607,8 @@ def compute_losses(
         tactile_history=tactile_history,
         act_chunk=act_chunk,
         expert_action=expert_action,
+        feature_metrics=feature_metrics,
     )
-
-    metrics = {
-        **metrics,
-        **{
-            name: value.detach()
-            for name, value in feature_metrics.items()
-        },
-    }
 
     return objective_loss, metrics, pred_delta, target_delta
 
@@ -636,6 +670,7 @@ def train_one_epoch(
             topk=diagnostic_topk,
         )
         metric_values["grad_norm"] = grad_norm
+        metric_values["objective_loss"] = float(objective_loss.detach().to(torch.float32).item())
         metric_values.update(
             {
                 key: value
@@ -653,9 +688,9 @@ def train_one_epoch(
         pbar.set_postfix(
             {
                 "loss": f"{float(objective_loss.detach().to(torch.float32).item()):.6f}",
-                "weighted": f"{metric_values['weighted_loss']:.6f}",
-                "unweighted": f"{metric_values['unweighted_loss']:.6f}",
-                "w_mean": f"{metric_values['weight_mean']:.3f}",
+                "weighted": f"{metric_values.get('weighted_loss', 0.0):.6f}",
+                "unweighted": f"{metric_values.get('unweighted_loss', 0.0):.6f}",
+                "w_mean": f"{metric_values.get('weight_mean', 0.0):.3f}",
             }
         )
 
@@ -724,8 +759,8 @@ def validate(
             )
             pbar.set_postfix(
                 {
-                    "weighted": f"{metric_values['weighted_loss']:.6f}",
-                    "unweighted": f"{metric_values['unweighted_loss']:.6f}",
+                    "weighted": f"{metric_values.get('weighted_loss', 0.0):.6f}",
+                    "unweighted": f"{metric_values.get('unweighted_loss', 0.0):.6f}",
                 }
             )
     epoch_metrics = finalize_metric_accumulator(
@@ -899,6 +934,11 @@ def main():
         tactile_channels = int(
             model_config["tactile_encoder"]["force"]["input_dim"]
         )
+    elif tactile_type == "vqvae":
+        tactile_history = dataloader_config["sequence"]["tactile_history_force"]
+        tactile_channels = int(
+            model_config["tactile_encoder"]["vqvae"]["input_dim"]
+        )
     else:
         raise ValueError(f"未知的 tactile_type: {tactile_type}")
 
@@ -916,6 +956,13 @@ def main():
     )
     tactile_channel_names = None
     if tactile_type == "force":
+        tactile_channel_names = validate_force_channel_order(
+            dataloader_config=dataloader_config,
+            model_config=model_config,
+            stats_payload=criterion_metadata["stats_payload"],
+        )
+    elif tactile_type == "vqvae":
+        # VQ-VAE使用force的通道顺序配置
         tactile_channel_names = validate_force_channel_order(
             dataloader_config=dataloader_config,
             model_config=model_config,
@@ -973,12 +1020,24 @@ def main():
         dataset,
     )
 
-    policy, preprocessor, postprocessor, act_device = (
-        load_lerobot_policy(
-            dataloader_config,
-            dataset,
+    act_cache_path = dataloader_config["policy"].get("act_cache_path")
+
+    if act_cache_path:
+        # 使用离线预处理缓存：不再加载/运行ACT策略
+        print(f"使用ACT离线缓存: {act_cache_path}")
+        policy, preprocessor, postprocessor, act_device = (
+            None,
+            None,
+            None,
+            device,
         )
-    )
+    else:
+        policy, preprocessor, postprocessor, act_device = (
+            load_lerobot_policy(
+                dataloader_config,
+                dataset,
+            )
+        )
 
     loaders = build_augmented_loaders(
         dataloader_config,
@@ -999,6 +1058,7 @@ def main():
         tactile_encoder_cfg=model_config["tactile_encoder"][tactile_type],
         state_encoder_cfg=model_config.get("state_encoder"),
         action_encoder_cfg=model_config.get("action_encoder"),
+        current_force_encoder_cfg=model_config.get("current_force_encoder"),
         fusion_cfg=model_config.get("fusion"),
         decoder_cfg=decoder_cfg,
         tactile_channel_mean=criterion.channel_mean,
@@ -1011,6 +1071,10 @@ def main():
         normalize_state_input=bool(
             model_config["state_encoder"].get("normalize_input", True)
         ),
+        use_act_visual=bool(
+            model_config.get("act_visual", {}).get("enabled", False)
+        ),
+        visual_encoder_cfg=model_config.get("act_visual"),
     ).to(device)
 
     print(
@@ -1139,32 +1203,32 @@ def main():
                     else None
                 ),
             )
-            val_loss = float(val_metrics["weighted_loss"])
+            val_loss = float(val_metrics.get("weighted_loss", val_metrics.get("unweighted_loss", 0.0)))
             epoch_pbar.set_postfix(
                 {
-                    "train_w": f"{train_metrics['weighted_loss']:.6f}",
+                    "train_w": f"{train_metrics.get('weighted_loss', 0.0):.6f}",
                     "val_w": f"{val_loss:.6f}",
                 }
             )
             print(
                 f"epoch {epoch}/{epochs} "
-                f"train_weighted={train_metrics['weighted_loss']:.6f} "
-                f"train_unweighted={train_metrics['unweighted_loss']:.6f} "
-                f"val_weighted={val_metrics['weighted_loss']:.6f} "
-                f"val_unweighted={val_metrics['unweighted_loss']:.6f}"
+                f"train_weighted={train_metrics.get('weighted_loss', 0.0):.6f} "
+                f"train_unweighted={train_metrics.get('unweighted_loss', 0.0):.6f} "
+                f"val_weighted={val_metrics.get('weighted_loss', 0.0):.6f} "
+                f"val_unweighted={val_metrics.get('unweighted_loss', 0.0):.6f}"
             )
         else:
             val_metrics = None
             val_loss = None
             epoch_pbar.set_postfix(
                 {
-                    "train_w": f"{train_metrics['weighted_loss']:.6f}",
+                    "train_w": f"{train_metrics.get('weighted_loss', 0.0):.6f}",
                 }
             )
             print(
                 f"epoch {epoch}/{epochs} "
-                f"train_weighted={train_metrics['weighted_loss']:.6f} "
-                f"train_unweighted={train_metrics['unweighted_loss']:.6f}"
+                f"train_weighted={train_metrics.get('weighted_loss', 0.0):.6f} "
+                f"train_unweighted={train_metrics.get('unweighted_loss', 0.0):.6f}"
             )
 
         if args.diagnostic_only:

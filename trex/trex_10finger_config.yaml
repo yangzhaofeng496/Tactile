@@ -1,0 +1,66 @@
+# T-Rex Official VQ-VAE Configuration (10-Finger Bi-Manual)
+# Dataset: dataset/trex_force_data  (observation.tactile_force, 60 = 10 fingers x 6 dims)
+# Based on: https://github.com/ZhuoyangLiu2005/T-Rex/blob/main/tactile_vqvae/config/vqvae_f6.yaml
+
+data:
+  window: 16              # frames per encoded chunk
+  stride: 4               # window-start spacing during training
+  val_ratio: 0.1          # validation split ratio
+  num_workers: 4
+
+model:
+  # Architecture
+  granularity: finger      # "finger" for per-finger quantization
+  n_fingers: 10            # ⚠️ 10 fingers (2 hands x 5)
+  per_finger_dim: 6        # 6-D force/torque per finger
+  window: 16
+  hidden_channels: 128
+  bottleneck_channels: 256
+  embed_dim: 256
+  n_strided_blocks: 2
+
+  # Quantizer
+  codebook_size: 64        # bigger codebook for 10 fingers
+  commitment_weight: 0.25
+  decay: 0.99              # EMA decay
+  revive_freq: 200         # check dead codes periodically
+  revive_threshold: 1.0    # cluster_size < 1.0 considered dead
+  init_mode: uniform       # "uniform" or "kaiming"
+
+  # Loss
+  use_magnitude_weight: true
+  weight_alpha: 2.0        # max extra weight on high-contact windows
+  weight_tau: 8.0          # magnitude scale (median ~8.5, max ~66 on this dataset)
+
+train:
+  epochs: 1000
+  batch_size: 128
+  lr: 3.0e-4
+  min_lr_ratio: 0.05
+  warmup_steps: 500
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  seed: 42
+
+  # Logging
+  log_every: 50
+  wandb_log_every: 50      # wandb logging interval (in batches)
+  val_every: 500           # validation interval (in steps)
+  save_every_epoch: 5
+
+# Wandb configuration
+wandb:
+  enabled: true
+  project: trex-vqvae
+  run_name: null           # null = auto-generate name
+  tags:
+    - trex
+    - 10-finger
+    - vqvae
+    - per-finger-quantization
+
+# Normalization strategy
+normalization:
+  method: "per_finger_per_channel"  # compute [10, 6] statistics
+  use_train_only: true              # only use train set for stats
+  clip_std_factor: 3.0              # clip to ±3σ before normalization

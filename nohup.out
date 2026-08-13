@@ -1,0 +1,43 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/yang/TactileEncoder/dataloader/preprocess_act_cache.py", line 249, in <module>
+    main()
+  File "/home/yang/TactileEncoder/dataloader/preprocess_act_cache.py", line 134, in main
+    dataset = build_base_dataset(config)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yang/TactileEncoder/dataloader/dataloader.py", line 929, in build_base_dataset
+    return LeRobotDataset(
+           ^^^^^^^^^^^^^^^
+  File "/home/yang/miniconda3/envs/lerobot_new/lib/python3.12/site-packages/lerobot/datasets/lerobot_dataset.py", line 261, in __init__
+    if force_cache_sync or not self.reader.try_load():
+                               ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yang/miniconda3/envs/lerobot_new/lib/python3.12/site-packages/lerobot/datasets/dataset_reader.py", line 133, in try_load
+    if not self._check_cached_episodes_sufficient():
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yang/miniconda3/envs/lerobot_new/lib/python3.12/site-packages/lerobot/datasets/dataset_reader.py", line 191, in _check_cached_episodes_sufficient
+    video_path = self.root / self._meta.get_video_file_path(ep_idx, vid_key)
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yang/miniconda3/envs/lerobot_new/lib/python3.12/site-packages/lerobot/datasets/dataset_metadata.py", line 302, in get_video_file_path
+    ep = self.episodes[ep_index]
+         ~~~~~~~~~~~~~^^^^^^^^^^
+  File "/home/yang/miniconda3/envs/lerobot_new/lib/python3.12/site-packages/datasets/arrow_dataset.py", line 3157, in __getitem__
+    return self._getitem(key)
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/yang/miniconda3/envs/lerobot_new/lib/python3.12/site-packages/datasets/arrow_dataset.py", line 3139, in _getitem
+    formatted_output = format_table(
+                       ^^^^^^^^^^^^^
+  File "/home/yang/miniconda3/envs/lerobot_new/lib/python3.12/site-packages/datasets/formatting/formatting.py", line 658, in format_table
+    return formatter(pa_table, query_type=query_type)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yang/miniconda3/envs/lerobot_new/lib/python3.12/site-packages/datasets/formatting/formatting.py", line 411, in __call__
+    return self.format_row(pa_table)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yang/miniconda3/envs/lerobot_new/lib/python3.12/site-packages/datasets/formatting/formatting.py", line 459, in format_row
+    row = self.python_arrow_extractor().extract_row(pa_table)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yang/miniconda3/envs/lerobot_new/lib/python3.12/site-packages/datasets/formatting/formatting.py", line 144, in extract_row
+    return _unnest(pa_table.to_pydict())
+                   ^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt
+加载LeRobot数据集……

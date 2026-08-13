@@ -216,8 +216,13 @@ def demo():
     # 初始化推理器
     inferencer = VQVAEInference(checkpoint_path, config_path, args.device)
 
-    # 生成随机测试数据
-    B, T, D = 4, 15, 12
+    # 生成随机测试数据（根据配置文件中的维度）
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+
+    B = 4
+    T = config['model']['input']['history_steps']
+    D = config['model']['input']['force_dim']
     force_history = np.random.randn(B, T, D).astype(np.float32)
 
     print(f"\n输入数据形状: {force_history.shape}")

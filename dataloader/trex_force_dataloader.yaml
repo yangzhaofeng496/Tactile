@@ -1,0 +1,27 @@
+dataset:
+  repo_id: "/home/yang/TactileEncoder/dataset/trex_force_data"
+  root: null
+  revision: null
+  video_backend: "torchcodec"
+
+  keys:
+    tactile_type: vqvae
+    tactile_force:
+      - "observation.tactile_force"
+
+sequence:
+  tactile_history_force: 16  # 触觉历史窗口长度
+  length: 16
+  pad_value: 0.0
+
+split:
+  train: 0.9  # Use 90% for training
+  val: 0.1    # Use 10% for validation
+  test: 0.0
+  seed: 42
+
+loader:
+  batch_size: 128
+  shuffle: true
+  num_workers: 4
+  drop_last: false

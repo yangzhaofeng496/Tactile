@@ -12,7 +12,7 @@ tactile_encoder:
   force:
     input_dim: 12         # 输入维度 (左右各6维，拼接后12维)
     hidden_dim: 128       # 隐藏层维度
-    output_dim: 256       # 输出维度
+    output_dim: 512       # 输出维度
     history_length: 30    # 历史时间步数
     channel_order:
       - left_Fx
@@ -37,10 +37,10 @@ tactile_encoder:
   # VQ-VAE编码器参数 (当 type="vqvae" 时使用)
   vqvae:
     input_dim: 12                    # 输入维度 (与VQ-VAE训练时一致)
-    output_dim: 256                  # 输出维度 (码本向量维度)
-    history_length: 15               # 历史时间步数 (必须与VQ-VAE训练时一致)
+    output_dim: 512                  # 输出维度 (码本向量维度)
+    history_length: 16               # 历史时间步数 (必须与VQ-VAE训练时一致=16)
     vqvae_config_path: "/home/yang/TactileEncoder/TactileSelfencoder/vqvae_config.yaml"
-    vqvae_checkpoint_path: "/home/yang/TactileEncoder/TactileSelfencoder/vqvae_checkpoints/50_16tokens_resume/checkpoint_epoch_100.pth"
+    vqvae_checkpoint_path: "/home/yang/TactileEncoder/TactileSelfencoder/vqvae_checkpoints/decoder_mlp/16tokens/checkpoint_epoch_200.pth"
     freeze: true                     # 是否冻结VQ-VAE参数
 
 # 当前力编码器参数 (新增)
@@ -72,9 +72,19 @@ action_encoder:
   hidden_dim: 128
   output_dim: 256
 
+# ACT视觉token编码器参数 (可选)
+# enabled: true时，将冻结ACT transformer encoder输出的视觉token
+# 经mean pooling后接入融合模块，与触觉/力/状态/动作一起训练。
+# 需要dataloader yaml中policy.use_act_visual也同时开启。
+act_visual:
+  enabled: true
+  input_dim: 512           # ACT的dim_model
+  output_dim: 256          # 视觉token编码后维度
+  pooling: "mean"          # 当前仅支持"mean"
+
 # 融合模块参数
 fusion:
-  input_dim: 768          # 256(tactile) + 128(current_force) + 128(state) + 256(action)
+  input_dim: 1280         # 512(tactile) + 128(current_force) + 128(state) + 256(action) + 256(visual)
   hidden_dim: 512
   output_dim: 256
 
@@ -95,7 +105,7 @@ training:
   device: "cuda"
   validate_every: 3
   checkpoint_every: 10
-  checkpoint_dir: "/home/yang/TactileEncoder/actmodel/dm_act_orin_fail/so101/dm_act_orin_fail/checkpoints/100000"
+  checkpoint_dir: "/home/yang/TactileEncoder/residual_actmodel/checkpoints"
   log_every: 10
   diagnostic_topk: 3
   diagnostic_val_batches: 1

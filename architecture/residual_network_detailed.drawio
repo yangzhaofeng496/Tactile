@@ -1,0 +1,168 @@
+<mxfile host="65bd71144e">
+    <diagram name="TactileResidualACT Detailed Architecture" id="detailed_arch">
+        <mxGraphModel dx="1726" dy="700" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2800" pageHeight="1600" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="title" value="TactileResidualACT - Detailed Layer Architecture" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=26;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="600" y="30" width="1600" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="tactile_box" value="TactileForceEncoder" style="swimlane;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=16;fontStyle=1;startSize=40;" parent="1" vertex="1">
+                    <mxGeometry x="100" y="120" width="400" height="480" as="geometry"/>
+                </mxCell>
+                <mxCell id="t_input" value="Input: [B, 16, 6]&lt;br&gt;History Force" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=13;fontStyle=1" parent="tactile_box" vertex="1">
+                    <mxGeometry x="50" y="60" width="300" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="t_transpose" value="Transpose → [B, 6, 16]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=12" parent="tactile_box" vertex="1">
+                    <mxGeometry x="50" y="130" width="300" height="35" as="geometry"/>
+                </mxCell>
+                <mxCell id="t_conv1" value="Conv1d(6→64, k=3, s=2) → [B, 64, 8]&lt;br&gt;BatchNorm1d + ReLU" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12" parent="tactile_box" vertex="1">
+                    <mxGeometry x="50" y="180" width="300" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="t_conv2" value="Conv1d(64→128, k=3, s=2) → [B, 128, 4]&lt;br&gt;BatchNorm1d + ReLU" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12" parent="tactile_box" vertex="1">
+                    <mxGeometry x="50" y="245" width="300" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="t_conv3" value="Conv1d(128→256, k=3, s=2) → [B, 256, 2]&lt;br&gt;BatchNorm1d + ReLU" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12" parent="tactile_box" vertex="1">
+                    <mxGeometry x="50" y="310" width="300" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="t_pool" value="AdaptiveAvgPool1d(1) → [B, 256, 1]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12" parent="tactile_box" vertex="1">
+                    <mxGeometry x="50" y="375" width="300" height="35" as="geometry"/>
+                </mxCell>
+                <mxCell id="t_output" value="Linear(256→256) + LayerNorm + ReLU&lt;br&gt;Output: [B, 256]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontStyle=1" parent="tactile_box" vertex="1">
+                    <mxGeometry x="50" y="420" width="300" height="45" as="geometry"/>
+                </mxCell>
+                <mxCell id="current_box" value="CurrentForceEncoder" style="swimlane;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=16;fontStyle=1;startSize=40;" parent="1" vertex="1">
+                    <mxGeometry x="550" y="120" width="400" height="280" as="geometry"/>
+                </mxCell>
+                <mxCell id="cf_input" value="Input: [B, 6]&lt;br&gt;Current Force" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=13;fontStyle=1" parent="current_box" vertex="1">
+                    <mxGeometry x="50" y="60" width="300" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="cf_fc1" value="Linear(6→64) + ReLU" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12" parent="current_box" vertex="1">
+                    <mxGeometry x="50" y="130" width="300" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="cf_fc2" value="Linear(64→128)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12" parent="current_box" vertex="1">
+                    <mxGeometry x="50" y="185" width="300" height="35" as="geometry"/>
+                </mxCell>
+                <mxCell id="cf_output" value="LayerNorm + ReLU&lt;br&gt;Output: [B, 128]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;fontStyle=1" parent="current_box" vertex="1">
+                    <mxGeometry x="50" y="230" width="300" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="state_box" value="StateEncoder" style="swimlane;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=16;fontStyle=1;startSize=40;" parent="1" vertex="1">
+                    <mxGeometry x="1000" y="120" width="400" height="280" as="geometry"/>
+                </mxCell>
+                <mxCell id="s_input" value="Input: [B, 6]&lt;br&gt;Robot State" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=13;fontStyle=1" parent="state_box" vertex="1">
+                    <mxGeometry x="50" y="60" width="300" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="s_fc1" value="Linear(6→64) + ReLU" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12" parent="state_box" vertex="1">
+                    <mxGeometry x="50" y="130" width="300" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="s_fc2" value="Linear(64→128)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12" parent="state_box" vertex="1">
+                    <mxGeometry x="50" y="185" width="300" height="35" as="geometry"/>
+                </mxCell>
+                <mxCell id="s_output" value="LayerNorm + ReLU&lt;br&gt;Output: [B, 128]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1" parent="state_box" vertex="1">
+                    <mxGeometry x="50" y="230" width="300" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="action_box" value="ActionEncoder" style="swimlane;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=16;fontStyle=1;startSize=40;" parent="1" vertex="1">
+                    <mxGeometry x="1450" y="120" width="400" height="280" as="geometry"/>
+                </mxCell>
+                <mxCell id="a_input" value="Input: [B, 30, 6]&lt;br&gt;ACT Action Chunk" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=13;fontStyle=1" parent="action_box" vertex="1">
+                    <mxGeometry x="50" y="60" width="300" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="a_reshape" value="Reshape → [B, 180]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#b85450;fontSize=12" parent="action_box" vertex="1">
+                    <mxGeometry x="50" y="130" width="300" height="35" as="geometry"/>
+                </mxCell>
+                <mxCell id="a_fc1" value="Linear(180→128) + ReLU" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12" parent="action_box" vertex="1">
+                    <mxGeometry x="50" y="180" width="300" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="a_fc2" value="Linear(128→256) + LayerNorm + ReLU&lt;br&gt;Output: [B, 256]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;fontStyle=1" parent="action_box" vertex="1">
+                    <mxGeometry x="50" y="230" width="300" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="fusion_box" value="FusionEncoder" style="swimlane;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=18;fontStyle=1;startSize=45;" parent="1" vertex="1">
+                    <mxGeometry x="550" y="700" width="850" height="400" as="geometry"/>
+                </mxCell>
+                <mxCell id="f_concat" value="Concatenate: [B, 256] + [B, 128] + [B, 128] + [B, 256]&lt;br&gt;→ [B, 768]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=13;fontStyle=1" parent="fusion_box" vertex="1">
+                    <mxGeometry x="100" y="60" width="650" height="55" as="geometry"/>
+                </mxCell>
+                <mxCell id="f_compute" value="&lt;b&gt;&lt;font style=&quot;font-size: 12px;&quot;&gt;Compute Modality Contributions (for analysis):&lt;br&gt;c_t = W[:512, :256] @ tactile_feature&lt;br&gt;c_cf = W[:512, 256:384] @ current_force_feature&lt;br&gt;c_s = W[:512, 384:512] @ state_feature&lt;br&gt;c_a = W[:512, 512:] @ action_feature&lt;/font&gt;&lt;/b&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;align=center;spacingLeft=10;" parent="fusion_box" vertex="1">
+                    <mxGeometry x="100" y="130" width="650" height="90" as="geometry"/>
+                </mxCell>
+                <mxCell id="f_fc1" value="Linear(768→512)&lt;br&gt;h_pre = c_t + c_cf + c_s + c_a + bias&lt;br&gt;[B, 512]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1" parent="fusion_box" vertex="1">
+                    <mxGeometry x="100" y="235" width="650" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="f_relu1" value="ReLU" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12" parent="fusion_box" vertex="1">
+                    <mxGeometry x="100" y="305" width="650" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="f_fc2" value="Linear(512→256) + ReLU&lt;br&gt;Output z: [B, 256]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1" parent="fusion_box" vertex="1">
+                    <mxGeometry x="100" y="345" width="650" height="45" as="geometry"/>
+                </mxCell>
+                <mxCell id="decoder_box" value="ResidualDecoder" style="swimlane;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=18;fontStyle=1;startSize=45;" parent="1" vertex="1">
+                    <mxGeometry x="650" y="1180" width="650" height="280" as="geometry"/>
+                </mxCell>
+                <mxCell id="d_input" value="Input z: [B, 256]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=13;fontStyle=1" parent="decoder_box" vertex="1">
+                    <mxGeometry x="100" y="60" width="450" height="45" as="geometry"/>
+                </mxCell>
+                <mxCell id="d_fc1" value="Linear(256→256) + ReLU" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12" parent="decoder_box" vertex="1">
+                    <mxGeometry x="100" y="120" width="450" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="d_fc2" value="Linear(256→180) (no activation)&lt;br&gt;[B, 180]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12" parent="decoder_box" vertex="1">
+                    <mxGeometry x="100" y="175" width="450" height="45" as="geometry"/>
+                </mxCell>
+                <mxCell id="d_output" value="Reshape → [B, 30, 6]&lt;br&gt;Output: Delta Action Δa" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=13;fontStyle=1" parent="decoder_box" vertex="1">
+                    <mxGeometry x="100" y="230" width="450" height="45" as="geometry"/>
+                </mxCell>
+                <mxCell id="arrow_t" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=3;strokeColor=#9673a6;entryX=0.15;entryY=0;entryDx=0;entryDy=0;entryPerimeter=0;" parent="1" source="t_output" target="fusion_box" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="300" y="650"/>
+                            <mxPoint x="678" y="650"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="arrow_cf" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=3;strokeColor=#d79b00;entryX=0.35;entryY=0;entryDx=0;entryDy=0;entryPerimeter=0;" parent="1" source="cf_output" target="fusion_box" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="750" y="650"/>
+                            <mxPoint x="848" y="650"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="arrow_s" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=3;strokeColor=#82b366;entryX=0.6;entryY=0;entryDx=0;entryDy=0;entryPerimeter=0;" parent="1" source="s_output" target="fusion_box" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="1200" y="650"/>
+                            <mxPoint x="1060" y="650"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="arrow_a" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=3;strokeColor=#b85450;entryX=0.85;entryY=0;entryDx=0;entryDy=0;entryPerimeter=0;" parent="1" source="a_fc2" target="fusion_box" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="1650" y="650"/>
+                            <mxPoint x="1273" y="650"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="arrow_fus_dec" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=4;strokeColor=#6c8ebf;" parent="1" source="fusion_box" target="decoder_box" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend_box" value="Legend" style="swimlane;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=14;fontStyle=1;startSize=35;" parent="1" vertex="1">
+                    <mxGeometry x="2000" y="120" width="600" height="350" as="geometry"/>
+                </mxCell>
+                <mxCell id="leg_conv" value="Conv + BatchNorm + ReLU" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12" parent="legend_box" vertex="1">
+                    <mxGeometry x="30" y="50" width="540" height="35" as="geometry"/>
+                </mxCell>
+                <mxCell id="leg_linear" value="Linear (MLP)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12" parent="legend_box" vertex="1">
+                    <mxGeometry x="30" y="95" width="540" height="35" as="geometry"/>
+                </mxCell>
+                <mxCell id="leg_norm" value="LayerNorm / BatchNorm" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12" parent="legend_box" vertex="1">
+                    <mxGeometry x="30" y="140" width="540" height="35" as="geometry"/>
+                </mxCell>
+                <mxCell id="leg_act" value="Activation Function: ReLU" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12" parent="legend_box" vertex="1">
+                    <mxGeometry x="30" y="185" width="540" height="35" as="geometry"/>
+                </mxCell>
+                <mxCell id="leg_notes" value="Notes:&lt;br&gt;• All encoders output features with LayerNorm + ReLU&lt;br&gt;• Fusion layer computes modality contributions for analysis&lt;br&gt;• Decoder final layer has NO activation (regression output)&lt;br&gt;• Action horizon = 30, Action dim = 6" style="text;html=1;strokeColor=#666666;fillColor=#ffffff;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=11;spacingLeft=10;spacingTop=5;" parent="legend_box" vertex="1">
+                    <mxGeometry x="30" y="235" width="540" height="105" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>

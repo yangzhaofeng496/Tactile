@@ -1,0 +1,33 @@
+# 快慢模型协调控制配置
+
+simulation:
+  # 总模拟时长（秒）
+  duration_seconds: 2.0
+  # 模拟速度倍率（>1 加速，1 为实时，0 表示尽快跑完）
+  speedup: 0.0
+
+# 传感器环境
+sensors:
+  camera_hz: 30          # 摄像头频率
+  tactile_hz: 90         # 触觉传感器频率
+  tactile_dim: 12        # 触觉向量维度（左右各6维）
+  state_dim: 6           # 关节状态维度
+
+# 慢模型（ACT）
+act:
+  horizon: 30            # 每次推理的动作步数
+  control_hz: 10         # 基准控制频率（每0.1秒一步）
+  # 真实模型加载（可选）；留空则使用内置模拟模型。
+  # 注意：当前 ACT checkpoint 依赖摄像头图像输入，
+  # 本模拟器只模拟 state/tactile，因此默认留空。
+  pretrained_path: "/home/yang/TactileEncoder/actmodel/dm/dm_act_orin_350_reinforce/checkpoints/100000/pretrained_model"
+  device: "cuda"
+
+# 快模型（残差网络）
+residual:
+  # 残差网络控制频率（需高于 act.control_hz）
+  control_hz: 90
+  tactile_history: 15    # 残差模型需要的触觉历史步数
+  # 真实模型加载（可选）；留空则使用内置模拟模型。
+  checkpoint_path: "/home/yang/TactileEncoder/TactileSelfencoder/vqvae_checkpoints/50_16tokens_resume/checkpoint_best.pth"
+  device: "cuda"

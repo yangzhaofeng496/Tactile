@@ -23,11 +23,11 @@ from lerobot.policies.factory import (
 
 @dataclass(frozen=True)
 class DatasetKeys:
-    tactile_type: str  # "image" or "force"
+    tactile_type: str  # "image", "force", or "vqvae"
     tactile_force: str | list[str]
-    current_force: str | list[str]  # 新增：当前力数据键
-    state: str
-    expert_action: str
+    current_force: str | list[str] | None = None  # 可选：残差网络模式需要
+    state: str | None = None  # 可选：残差网络模式需要
+    expert_action: str | None = None  # 可选：残差网络模式需要
     tactile_image: str | list[str] | None = None  # 可选：仅当tactile_type="image"时需要
     tactile_force_channel_order: list[str] | None = None
 
@@ -38,7 +38,7 @@ class DatasetKeys:
             if self.tactile_image is None:
                 raise ValueError("tactile_type='image' 时必须提供 tactile_image 键")
             return self.tactile_image
-        elif self.tactile_type == "force":
+        elif self.tactile_type in ("force", "vqvae"):
             return self.tactile_force
         else:
             raise ValueError(f"未知的 tactile_type: {self.tactile_type}")
@@ -57,6 +57,29 @@ def load_yaml(path: str | Path) -> dict[str, Any]:
         raise ValueError("YAML顶层必须是字典。")
 
     return config
+
+
+def resolve_dataset_paths(
+    repo_id: str,
+    root: str | Path | None,
+) -> tuple[str, Path | None]:
+    """将 dataset 配置中的 repo_id/root 解析为 lerobot 可用的参数。
+
+    lerobot 要求：当数据集是本地目录时，repo_id 应为目录名，
+    root 应为该目录本身（或其父目录）。若 root 未提供且
+    repo_id 指向一个已存在的本地目录，则自动转换，避免 lerobot
+    把本地路径误当作 Hugging Face 仓库名。
+    """
+    root_path = Path(root) if root is not None else None
+
+    if root_path is not None:
+        return repo_id, root_path
+
+    repo_path = Path(repo_id)
+    if repo_path.is_dir() and (repo_path / "meta").is_dir():
+        return repo_path.name, repo_path
+
+    return repo_id, None
 
 
 def set_seed(seed: int) -> None:
@@ -271,17 +294,22 @@ def split_episode_ids(
 
     episode_ids = list(episode_ids)
 
-    if len(episode_ids) < 3:
+    # 计算需要的最小episode数量
+    num_nonzero_splits = sum([train_ratio > 0, val_ratio > 0, test_ratio > 0])
+
+    if len(episode_ids) < num_nonzero_splits:
         raise ValueError(
-            "至少需要3个episode才能划分train/val/test。"
+            f"至少需要{num_nonzero_splits}个episode才能划分。当前只有{len(episode_ids)}个。"
         )
 
     rng = np.random.default_rng(seed)
     rng.shuffle(episode_ids)
 
     total = len(episode_ids)
-    num_val = max(1, round(total * val_ratio))
-    num_test = max(1, round(total * test_ratio))
+
+    # 如果某个split的ratio为0，则分配0个episode
+    num_val = max(1, round(total * val_ratio)) if val_ratio > 0 else 0
+    num_test = max(1, round(total * test_ratio)) if test_ratio > 0 else 0
     num_train = total - num_val - num_test
 
     if num_train < 1:
@@ -328,8 +356,8 @@ class TactileACTDataset(Dataset):
         keys: DatasetKeys,
         act_observation_keys: Sequence[str],
         tactile_history: int,
-        action_horizon: int,
-        tactile_type: str,  # 新增：触觉类型
+        action_horizon: int | None = None,  # VQ-VAE模式下可选
+        tactile_type: str = "force",  # 触觉类型
     ) -> None:
         super().__init__()
 
@@ -339,7 +367,7 @@ class TactileACTDataset(Dataset):
         self.keys = keys
         self.act_observation_keys = list(act_observation_keys)
         self.tactile_history = tactile_history
-        self.action_horizon = action_horizon
+        self.action_horizon = action_horizon if action_horizon is not None else 0
         self.tactile_type = tactile_type
 
         self.valid_indices = self._build_valid_indices()
@@ -359,8 +387,12 @@ class TactileACTDataset(Dataset):
             # t-L+1 >= start
             first_center = start + self.tactile_history - 1
 
-            # t+K-1 <= end-1
-            last_center = end - self.action_horizon
+            # VQ-VAE模式：不需要未来动作，last_center = end - 1
+            # 残差网络模式：t+K-1 <= end-1
+            if self.action_horizon > 0:
+                last_center = end - self.action_horizon
+            else:
+                last_center = end - 1
 
             if first_center <= last_center:
                 valid_indices.extend(
@@ -393,32 +425,39 @@ class TactileACTDataset(Dataset):
             if self.tactile_type == "image":
                 # 图像: [T, C, H, W]，在C维度拼接
                 tactile_history = torch.cat(tactile_tensors, dim=1)
-            elif self.tactile_type == "force":
+            elif self.tactile_type in ("force", "vqvae"):
                 # 合力: [T, D]，在D维度拼接
                 tactile_history = torch.cat(tactile_tensors, dim=1)
             else:
                 raise ValueError(f"未知的 tactile_type: {self.tactile_type}")
 
-        # 处理当前力数据（新增）
-        if isinstance(self.keys.current_force, str):
-            current_force = sample[self.keys.current_force].float()
+        # 处理当前力数据（仅残差网络模式需要）
+        if self.keys.current_force is not None:
+            if isinstance(self.keys.current_force, str):
+                current_force = sample[self.keys.current_force].float()
+            else:
+                # 多个当前力输入在维度拼接
+                current_force_tensors = [
+                    sample[key].float()
+                    for key in self.keys.current_force
+                ]
+                current_force = torch.cat(current_force_tensors, dim=-1)
+
+            # 如果current_force有时间维度，取最后一帧
+            if current_force.ndim > 1 and current_force.shape[0] > 1:
+                current_force = current_force[-1]
+
+            # 如果是单帧但有时间维度，squeeze掉
+            if current_force.ndim > 1 and current_force.shape[0] == 1:
+                current_force = current_force.squeeze(0)
         else:
-            # 多个当前力输入在维度拼接
-            current_force_tensors = [
-                sample[key].float()
-                for key in self.keys.current_force
-            ]
-            current_force = torch.cat(current_force_tensors, dim=-1)
+            current_force = None
 
-        # 如果current_force有时间维度，取最后一帧
-        if current_force.ndim > 1 and current_force.shape[0] > 1:
-            current_force = current_force[-1]
-
-        # 如果是单帧但有时间维度，squeeze掉
-        if current_force.ndim > 1 and current_force.shape[0] == 1:
-            current_force = current_force.squeeze(0)
-
-        expert_action = sample[self.keys.expert_action].float()
+        # 处理专家动作（仅残差网络模式需要）
+        if self.keys.expert_action is not None:
+            expert_action = sample[self.keys.expert_action].float()
+        else:
+            expert_action = None
 
         if tactile_history.shape[0] != self.tactile_history:
             raise RuntimeError(
@@ -427,7 +466,8 @@ class TactileACTDataset(Dataset):
                 f"期望第一维为{self.tactile_history}"
             )
 
-        if expert_action.shape[0] != self.action_horizon:
+        # 仅在有expert_action时检查
+        if expert_action is not None and expert_action.shape[0] != self.action_horizon:
             raise RuntimeError(
                 "专家动作时间长度错误："
                 f"得到{tuple(expert_action.shape)}，"
@@ -436,8 +476,6 @@ class TactileACTDataset(Dataset):
 
         output: dict[str, Tensor] = {
             "tactile_history": tactile_history,
-            "current_force": current_force,  # 新增
-            "expert_action": expert_action,
             "episode_index": torch.as_tensor(
                 sample["episode_index"],
                 dtype=torch.long,
@@ -451,6 +489,12 @@ class TactileACTDataset(Dataset):
                 dtype=torch.long,
             ),
         }
+
+        # 仅在残差网络模式添加这些字段
+        if current_force is not None:
+            output["current_force"] = current_force
+        if expert_action is not None:
+            output["expert_action"] = expert_action
 
         # 原样返回ACT需要的当前观测。
         # 注意：触觉键如果在这里，需要特殊处理（取最后一帧）
@@ -546,6 +590,8 @@ class ACTAugmentedLoader:
         device: torch.device,
         action_horizon: int,
         use_postprocessor: bool = True,
+        use_act_visual: bool = False,
+        act_cache_path: str | Path | None = None,
     ) -> None:
         self.dataloader = dataloader
         self.policy = policy
@@ -555,95 +601,225 @@ class ACTAugmentedLoader:
         self.device = device
         self.action_horizon = action_horizon
         self.use_postprocessor = use_postprocessor
+        self.use_act_visual = use_act_visual
 
-        if not hasattr(policy, "predict_action_chunk"):
-            raise TypeError(
-                f"{type(policy).__name__}没有predict_action_chunk()，"
-                "不能作为动作块策略使用。"
-            )
+        # 离线预处理缓存：设置后直接从缓存读取act_chunk/act_visual，
+        # 不再实时运行ACT推理。
+        self.act_cache_path = act_cache_path
+        self.act_cache: dict[int, dict] | None = None
+        self._act_encoder_out = None
+        self._act_visual_hook = None
+        if act_cache_path is not None:
+            act_cache_path = Path(act_cache_path)
+            if not act_cache_path.is_file():
+                raise FileNotFoundError(
+                    f"ACT预处理缓存不存在: {act_cache_path}"
+                )
+            cache = torch.load(act_cache_path, map_location="cpu")
+            self.act_cache = cache
 
-        self.policy.eval()
+        if self.act_cache is None:
+            if not hasattr(policy, "predict_action_chunk"):
+                raise TypeError(
+                    f"{type(policy).__name__}没有predict_action_chunk()，"
+                    "不能作为动作块策略使用。"
+                )
 
-        for parameter in self.policy.parameters():
-            parameter.requires_grad_(False)
+            self.policy.eval()
+
+            for parameter in self.policy.parameters():
+                parameter.requires_grad_(False)
+
+            if self.use_act_visual:
+                model = getattr(policy, "model", None)
+                encoder = getattr(model, "encoder", None)
+                if encoder is None:
+                    raise TypeError(
+                        "use_act_visual=True但ACT policy没有transformer encoder。"
+                    )
+                # encoder输出encoder_out为 [S, B, D]，
+                # 前n_pre_tokens个token是latent/(robot_state)/(env_state)，
+                # 其余是各相机的视觉token。
+                self._n_pre_tokens = 1
+                if getattr(policy.config, "robot_state_feature", None):
+                    self._n_pre_tokens += 1
+                if getattr(policy.config, "env_state_feature", None):
+                    self._n_pre_tokens += 1
+                self._act_visual_hook = encoder.register_forward_hook(
+                    self._capture_encoder_out
+                )
+        else:
+            self.policy = None
+            self.preprocessor = None
+            self.postprocessor = None
+
+    def _capture_encoder_out(self, module, args, output):
+        self._act_encoder_out = output
+
+    def _close_visual_hook(self):
+        if self._act_visual_hook is not None:
+            self._act_visual_hook.remove()
+            self._act_visual_hook = None
+
+    def __del__(self):
+        self._close_visual_hook()
 
     def __len__(self) -> int:
         return len(self.dataloader)
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
+        if self.act_cache is not None:
+            yield from self._iter_from_cache()
+            return
+
         self.policy.eval()
+        self._act_encoder_out = None
 
-        for cpu_batch in self.dataloader:
-            batch = move_to_device(
-                cpu_batch,
-                self.device,
-            )
-
-            observation = {
-                key: batch[key]
-                for key in self.act_observation_keys
-            }
-
-            # 使用checkpoint自带processor进行归一化、
-            # 图像处理、设备处理等。
-            processed_observation = self.preprocessor(
-                observation
-            )
-
-            with torch.inference_mode():
-                predicted_chunk = (
-                    self.policy.predict_action_chunk(
-                        processed_observation
-                    )
+        try:
+            for cpu_batch in self.dataloader:
+                batch = move_to_device(
+                    cpu_batch,
+                    self.device,
                 )
 
-                if self.use_postprocessor:
-                    predicted_chunk = self.postprocessor(
+                observation = {
+                    key: batch[key]
+                    for key in self.act_observation_keys
+                }
+
+                # 使用checkpoint自带processor进行归一化、
+                # 图像处理、设备处理等。
+                processed_observation = self.preprocessor(
+                    observation
+                )
+
+                with torch.inference_mode():
+                    predicted_chunk = (
+                        self.policy.predict_action_chunk(
+                            processed_observation
+                        )
+                    )
+
+                    if self.use_postprocessor:
+                        predicted_chunk = self.postprocessor(
+                            predicted_chunk
+                        )
+
+                    act_chunk = extract_action_tensor(
                         predicted_chunk
                     )
 
-                act_chunk = extract_action_tensor(
-                    predicted_chunk
+                if self.use_act_visual:
+                    # 提取视觉token: encoder_out [S, B, D] -> [B, S_vis, D]
+                    if self._act_encoder_out is None:
+                        raise RuntimeError(
+                            "use_act_visual=True但没有捕获到ACT encoder输出。"
+                        )
+                    encoder_out = self._act_encoder_out
+                    self._act_encoder_out = None
+                    visual_tokens = encoder_out[
+                        self._n_pre_tokens:, :, :
+                    ].transpose(0, 1)  # [B, S_vis, D]
+                    if visual_tokens.shape[1] == 0:
+                        raise RuntimeError(
+                            "ACT encoder输出中没有视觉token。"
+                            "请确认ACT checkpoint包含图像输入。"
+                        )
+                    batch["act_visual_tokens"] = visual_tokens.contiguous()
+
+                if act_chunk.ndim != 3:
+                    raise RuntimeError(
+                        "ACT输出必须为[B, chunk_size, action_dim]，"
+                        f"当前为{tuple(act_chunk.shape)}"
+                    )
+
+                if act_chunk.shape[1] < self.action_horizon:
+                    raise RuntimeError(
+                        "ACT输出chunk长度小于YAML配置的"
+                        f"action_horizon：ACT={act_chunk.shape[1]}，"
+                        f"配置={self.action_horizon}"
+                    )
+
+                act_chunk = act_chunk[
+                    :, :self.action_horizon
+                ]
+
+                expert_action = batch["expert_action"][
+                    :, :self.action_horizon
+                ]
+
+                act_chunk = act_chunk.to(
+                    device=expert_action.device,
+                    dtype=expert_action.dtype,
+                    non_blocking=True,
                 )
 
-            if act_chunk.ndim != 3:
-                raise RuntimeError(
-                    "ACT输出必须为[B, chunk_size, action_dim]，"
-                    f"当前为{tuple(act_chunk.shape)}"
+                if act_chunk.shape != expert_action.shape:
+                    raise RuntimeError(
+                        "ACT动作与专家动作形状不同：\n"
+                        f"ACT:    {tuple(act_chunk.shape)}\n"
+                        f"expert: {tuple(expert_action.shape)}"
+                    )
+
+                batch["act_chunk"] = act_chunk
+                batch["delta_action_target"] = (
+                    expert_action - act_chunk
                 )
 
-            if act_chunk.shape[1] < self.action_horizon:
-                raise RuntimeError(
-                    "ACT输出chunk长度小于YAML配置的"
-                    f"action_horizon：ACT={act_chunk.shape[1]}，"
-                    f"配置={self.action_horizon}"
-                )
+                yield batch
+        finally:
+            # 迭代结束后移除forward hook，避免内存泄漏
+            self._close_visual_hook()
 
-            act_chunk = act_chunk[
-                :, :self.action_horizon
-            ]
+    def _iter_from_cache(self) -> Iterator[dict[str, Any]]:
+        """从离线预处理缓存读取act_chunk/act_visual，不运行ACT推理。"""
+        for cpu_batch in self.dataloader:
+            batch = move_to_device(cpu_batch, self.device)
 
-            expert_action = batch["expert_action"][
-                :, :self.action_horizon
-            ]
+            absolute_indices = batch["absolute_index"].cpu().tolist()
 
-            act_chunk = act_chunk.to(
-                device=expert_action.device,
-                dtype=expert_action.dtype,
+            act_chunks = []
+            act_visuals = []
+            for idx in absolute_indices:
+                entry = self.act_cache.get(int(idx))
+                if entry is None:
+                    raise KeyError(
+                        f"ACT缓存中缺少absolute_index={idx}，"
+                        "请用相同数据集配置重新运行预处理。"
+                    )
+                act_chunks.append(entry["act_chunk"])
+                if self.use_act_visual:
+                    if "act_visual" not in entry:
+                        raise KeyError(
+                            f"ACT缓存中absolute_index={idx}缺少act_visual，"
+                            "预处理时需开启use_act_visual。"
+                        )
+                    act_visuals.append(entry["act_visual"])
+
+            act_chunk = torch.stack(act_chunks, dim=0).to(
+                device=self.device,
+                dtype=batch["expert_action"].dtype,
                 non_blocking=True,
             )
 
+            expert_action = batch["expert_action"][:, :self.action_horizon]
+
             if act_chunk.shape != expert_action.shape:
                 raise RuntimeError(
-                    "ACT动作与专家动作形状不同：\n"
-                    f"ACT:    {tuple(act_chunk.shape)}\n"
-                    f"expert: {tuple(expert_action.shape)}"
+                    "缓存act_chunk与专家动作形状不同：\n"
+                    f"act_chunk: {tuple(act_chunk.shape)}\n"
+                    f"expert:    {tuple(expert_action.shape)}"
                 )
 
             batch["act_chunk"] = act_chunk
-            batch["delta_action_target"] = (
-                expert_action - act_chunk
-            )
+            batch["delta_action_target"] = expert_action - act_chunk
+
+            if self.use_act_visual:
+                act_visual = torch.stack(act_visuals, dim=0).to(
+                    device=self.device,
+                    non_blocking=True,
+                )
+                batch["act_visual_tokens"] = act_visual
 
             yield batch
 
@@ -661,19 +837,25 @@ def check_dataset_features(
     else:
         tactile_keys = set(keys.tactile)
 
-    # 处理单个或多个当前力键
-    if isinstance(keys.current_force, str):
-        current_force_keys = {keys.current_force}
-    else:
-        current_force_keys = set(keys.current_force)
-
+    # 构建必需字段集合（根据模式不同而不同）
     required = {
-        keys.state,
-        keys.expert_action,
         *act_observation_keys,
         *tactile_keys,
-        *current_force_keys,
     }
+
+    # 仅在残差网络模式添加这些字段
+    if keys.current_force is not None:
+        if isinstance(keys.current_force, str):
+            current_force_keys = {keys.current_force}
+        else:
+            current_force_keys = set(keys.current_force)
+        required.update(current_force_keys)
+
+    if keys.state is not None:
+        required.add(keys.state)
+
+    if keys.expert_action is not None:
+        required.add(keys.expert_action)
 
     missing = required - available
 
@@ -696,10 +878,15 @@ def build_base_dataset(
 
     keys = DatasetKeys(**dataset_cfg["keys"])
 
+    resolved_repo_id, resolved_root = resolve_dataset_paths(
+        dataset_cfg["repo_id"],
+        dataset_cfg.get("root"),
+    )
+
     # 第一次加载只用于获取fps。
     metadata_dataset = LeRobotDataset(
-        repo_id=dataset_cfg["repo_id"],
-        root=dataset_cfg.get("root"),
+        repo_id=resolved_repo_id,
+        root=resolved_root,
         revision=dataset_cfg.get("revision"),
         video_backend=video_backend,
     )
@@ -709,7 +896,7 @@ def build_base_dataset(
     # 根据触觉类型选择对应的历史长度
     if keys.tactile_type == "image":
         tactile_history_length = int(sequence_cfg["tactile_history_image"])
-    elif keys.tactile_type == "force":
+    elif keys.tactile_type in ("force", "vqvae"):
         tactile_history_length = int(sequence_cfg["tactile_history_force"])
     else:
         raise ValueError(f"未知的 tactile_type: {keys.tactile_type}")
@@ -728,18 +915,20 @@ def build_base_dataset(
         for tactile_key in keys.tactile:
             delta_timestamps[tactile_key] = tactile_history_timestamps
 
-    delta_timestamps[keys.expert_action] = make_future_timestamps(
-        horizon=int(
-            sequence_cfg["action_horizon"]
-        ),
-        fps=fps,
-    )
+    # 仅在残差网络模式添加expert_action的时间戳
+    if keys.expert_action is not None:
+        delta_timestamps[keys.expert_action] = make_future_timestamps(
+            horizon=int(
+                sequence_cfg["action_horizon"]
+            ),
+            fps=fps,
+        )
 
     # ACT状态和图像不放入delta_timestamps，
     # 因而返回当前时刻观测，而不是额外的时间维。
     return LeRobotDataset(
-        repo_id=dataset_cfg["repo_id"],
-        root=dataset_cfg.get("root"),
+        repo_id=resolved_repo_id,
+        root=resolved_root,
         revision=dataset_cfg.get("revision"),
         delta_timestamps=delta_timestamps,
         video_backend=video_backend,
@@ -760,9 +949,8 @@ def build_normal_dataloaders(
 
     keys = DatasetKeys(**dataset_cfg["keys"])
 
-    act_observation_keys = dataset_cfg[
-        "act_observation_keys"
-    ]
+    # VQ-VAE模式下不需要act_observation_keys
+    act_observation_keys = dataset_cfg.get("act_observation_keys", [])
 
     check_dataset_features(
         dataset=dataset,
@@ -791,13 +979,12 @@ def build_normal_dataloaders(
                 sequence_cfg["tactile_history_image"] if keys.tactile_type == "image"
                 else sequence_cfg["tactile_history_force"]
             ),
-            action_horizon=int(
-                sequence_cfg["action_horizon"]
-            ),
+            action_horizon=int(sequence_cfg["action_horizon"]) if "action_horizon" in sequence_cfg else None,
             tactile_type=keys.tactile_type,
         )
         for split_name, episode_ids
         in episode_splits.items()
+        if len(episode_ids) > 0  # 跳过空split
     }
 
     num_workers = int(loader_cfg["num_workers"])
@@ -817,8 +1004,11 @@ def build_normal_dataloaders(
     generator = torch.Generator()
     generator.manual_seed(int(split_cfg["seed"]))
 
-    dataloaders = {
-        "train": DataLoader(
+    dataloaders = {}
+
+    # 只为存在的数据集创建dataloader
+    if "train" in datasets:
+        dataloaders["train"] = DataLoader(
             datasets["train"],
             shuffle=bool(
                 loader_cfg.get("shuffle_train", True)
@@ -828,20 +1018,23 @@ def build_normal_dataloaders(
             ),
             generator=generator,
             **common_loader_kwargs,
-        ),
-        "val": DataLoader(
+        )
+
+    if "val" in datasets:
+        dataloaders["val"] = DataLoader(
             datasets["val"],
             shuffle=False,
             drop_last=False,
             **common_loader_kwargs,
-        ),
-        "test": DataLoader(
+        )
+
+    if "test" in datasets:
+        dataloaders["test"] = DataLoader(
             datasets["test"],
             shuffle=False,
             drop_last=False,
             **common_loader_kwargs,
-        ),
-    }
+        )
 
     return dataloaders, datasets
 
@@ -949,6 +1142,15 @@ def build_augmented_loaders(
         )
     )
 
+    use_act_visual = bool(
+        config["policy"].get(
+            "use_act_visual",
+            False,
+        )
+    )
+
+    act_cache_path = config["policy"].get("act_cache_path")
+
     return {
         split_name: ACTAugmentedLoader(
             dataloader=loader,
@@ -959,6 +1161,8 @@ def build_augmented_loaders(
             device=device,
             action_horizon=action_horizon,
             use_postprocessor=use_postprocessor,
+            use_act_visual=use_act_visual,
+            act_cache_path=act_cache_path,
         )
         for split_name, loader
         in normal_loaders.items()
@@ -1058,15 +1262,21 @@ def main() -> None:
     )
 
     print("加载冻结的LeRobot策略……")
-    (
-        policy,
-        preprocessor,
-        postprocessor,
-        device,
-    ) = load_lerobot_policy(
-        config=config,
-        dataset=dataset,
-    )
+    act_cache_path = config["policy"].get("act_cache_path")
+    if act_cache_path:
+        print(f"使用ACT离线缓存: {act_cache_path}，跳过策略加载")
+        policy = preprocessor = postprocessor = None
+        device = resolve_device(config["policy"].get("device", "cuda"))
+    else:
+        (
+            policy,
+            preprocessor,
+            postprocessor,
+            device,
+        ) = load_lerobot_policy(
+            config=config,
+            dataset=dataset,
+        )
 
     print("构建带ACT预测的DataLoader……")
     augmented_loaders = build_augmented_loaders(
@@ -1082,9 +1292,10 @@ def main() -> None:
     print(f"  dataset repo:  {dataset.repo_id}")
     print(f"  fps:           {dataset.fps}")
     print(f"  episodes:      {dataset.num_episodes}")
-    print(f"  policy class:  {type(policy).__name__}")
-    print(f"  policy type:   {policy.config.type}")
-    print(f"  chunk size:    {policy.config.chunk_size}")
+    if policy is not None:
+        print(f"  policy class:  {type(policy).__name__}")
+        print(f"  policy type:   {policy.config.type}")
+        print(f"  chunk size:    {policy.config.chunk_size}")
     print(f"  device:        {device}")
 
     print("\n数据划分：")

@@ -1,0 +1,141 @@
+# T-Rex style per-finger force history VQ-VAE
+# Two-finger adaptation of T-Rex's 5-finger design
+
+model:
+  # Per-finger force history encoding
+  num_fingers: 2              # Number of fingers (T-Rex uses 5, we use 2)
+  force_dim: 6                # Per-finger force/torque dim: [Fx, Fy, Fz, Mx, My, Mz]
+  history_steps: 16           # Temporal window length T
+
+  # Shared encoder across fingers
+  encoder:
+    # T-Rex uses Conv1d with finger identity embedding
+    # Input: [B*num_fingers, 6, 16] after transpose
+    conv1_in_channels: 6
+    conv1_out_channels: 128
+    conv1_kernel_size: 5
+    conv1_stride: 1
+    conv1_padding: 2
+
+    # First downsampling: 16 -> 8
+    conv2_in_channels: 128
+    conv2_out_channels: 128
+    conv2_kernel_size: 5
+    conv2_stride: 2
+    conv2_padding: 2
+
+    # Second downsampling: 8 -> 4
+    conv3_in_channels: 128
+    conv3_out_channels: 256
+    conv3_kernel_size: 5
+    conv3_stride: 2
+    conv3_padding: 2
+
+    # Final conv before pooling
+    conv4_in_channels: 256
+    conv4_out_channels: 256
+    conv4_kernel_size: 3
+    conv4_stride: 1
+    conv4_padding: 1
+
+    # Temporal pooling: [B*2, 256, 4] -> [B*2, 256]
+    use_avg_pool: true
+
+    # Finger identity embedding dimension
+    finger_embed_dim: 16
+
+    # Normalization
+    use_group_norm: true
+    num_groups: 8
+
+    # Activation
+    activation: gelu  # T-Rex may use GELU
+
+  # Vector Quantizer (shared codebook for all fingers)
+  quantizer:
+    num_embeddings: 64        # Codebook size K
+    embedding_dim: 256        # Must match encoder output
+    commitment_cost: 0.25     # Beta in T-Rex
+    ema_decay: 0.99
+    ema_epsilon: 1.0e-5
+
+    # Initialization
+    init_strategy: kmeans     # Options: first_batch, kmeans, random
+    init_eps: 1.0e-5
+    kmeans_init_samples: 4096
+    kmeans_iterations: 20
+
+  # Decoder (shared across fingers)
+  decoder:
+    # Reconstruct [B*2, 16, 6] from [B*2, 256]
+    # T-Rex likely uses transposed conv or MLP
+    fc1_in: 256
+    fc1_out: 512
+    fc2_out: 1024
+    output_dim: 96  # 16 * 6
+
+    use_group_norm: true
+    num_groups: 8
+    activation: gelu
+
+# Loss configuration
+loss:
+  # Magnitude-weighted reconstruction loss (T-Rex specific)
+  use_magnitude_weighted_recon: true
+  magnitude_weight_eps: 1.0e-6
+
+  # Standard loss weights
+  reconstruction_weight: 1.0
+  commitment_weight: 1.0  # Handled inside quantizer via commitment_cost
+
+# Training
+training:
+  batch_size: 32
+  learning_rate: 3.0e-4
+  weight_decay: 1.0e-5
+  num_epochs: 1000
+  num_workers: 8
+  device: cuda
+
+  # Logging
+  log_every: 50
+  save_every: 10
+  save_dir: TactileSelfencoder/trex_vqvae_checkpoints
+
+  # Gradient clipping
+  grad_clip_norm: 1.0
+
+  # Validation
+  val_every: 1
+  val_batches: 50
+
+# Data configuration
+data:
+  # Path to dataset with two-finger force history
+  dataloader_config: dataloader/vqvae_tactile.yaml
+
+  # Normalization: per-finger, per-channel statistics
+  normalize: true
+  normalization_stats: null  # Will be computed from training set
+
+  # Data shape: [B, 16, 12] -> reshape to [B, 16, 2, 6]
+  # finger_1: x[..., 0:6]
+  # finger_2: x[..., 6:12]
+
+# Dead code replacement
+dead_code_replacement:
+  enabled: true
+  usage_decay: 0.99
+  dead_threshold: 0.1
+  dead_patience: 1000
+  check_interval: 100
+  reset_interval: 500
+  reset_count: 1.0
+  reset_noise_scale: 1.0e-4
+
+# Weights & Biases
+wandb:
+  enabled: true
+  project: trex-tactile-vqvae
+  run_name: ""  # Auto-generated
+  entity: null
