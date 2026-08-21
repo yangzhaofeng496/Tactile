@@ -2,6 +2,10 @@
 
 # 触觉编码器类型选择
 tactile_encoder:
+  # 触觉历史分支开关:
+  #   true  -> 使用触觉历史输入 (由下方 type 决定编码器: vqvae/force/image)
+  #   false -> 完全移除触觉历史分支，模型只使用 current_force + state + act_chunk (+visual)
+  enabled: false
   # 可选: "force", "image", 或 "vqvae"
   # - "force": 使用1D时间卷积处理6维合力历史 (输入: [B, 16, 6])
   # - "image": 使用2D卷积处理触觉图像 (输入: [B, 10, 6, 288, 384])
@@ -11,7 +15,7 @@ tactile_encoder:
   # 合力编码器参数 (当 type="force" 时使用)
   force:
     input_dim: 12         # 输入维度 (左右各6维，拼接后12维)
-    hidden_dim: 128       # 隐藏层维度
+    hidden_dim: 64        # 隐藏层维度
     output_dim: 512       # 输出维度
     history_length: 30    # 历史时间步数
     channel_order:
@@ -46,16 +50,16 @@ tactile_encoder:
 # 当前力编码器参数 (新增)
 current_force_encoder:
   input_dim: 12          # 当前时刻的12维力（左右各6维拼接）
-  hidden_dim: 64         # 隐藏层维度
-  output_dim: 128        # 输出维度
-  normalize_input: false # 是否归一化输入
+  hidden_dim: 32         # 隐藏层维度
+  output_dim: 36         # 输出维度（进一步压缩模型）
+  normalize_input: false
   # stats_path: "/home/yang/TactileEncoder/dataloader/util/tactile_analysis/current_force_stats.json"
 
 # 状态编码器参数
 state_encoder:
   input_dim: 6
-  hidden_dim: 128
-  output_dim: 128
+  hidden_dim: 32
+  output_dim: 36
   normalize_input: true
   stats_path: "/home/yang/TactileEncoder/dataloader/util/tactile_analysis/state_stats.json"
   channel_order:
@@ -69,8 +73,8 @@ state_encoder:
 # 动作编码器参数
 action_encoder:
   input_dim: 180           # 30步 × 6维
-  hidden_dim: 128
-  output_dim: 256
+  hidden_dim: 80
+  output_dim: 72
 
 # ACT视觉token编码器参数 (可选)
 # enabled: true时，将冻结ACT transformer encoder输出的视觉token
@@ -79,19 +83,24 @@ action_encoder:
 act_visual:
   enabled: true
   input_dim: 512           # ACT的dim_model
-  output_dim: 256          # 视觉token编码后维度
+  output_dim: 72           # 视觉token编码后维度（进一步压缩模型）
   pooling: "mean"          # 当前仅支持"mean"
+
+# 根据当前力动态调制融合特征（FiLM）
+force_film:
+  enabled: false
+  hidden_dim: 64
 
 # 融合模块参数
 fusion:
-  input_dim: 1280         # 512(tactile) + 128(current_force) + 128(state) + 256(action) + 256(visual)
-  hidden_dim: 512
-  output_dim: 256
+  input_dim: 216           # 36(current_force) + 36(state) + 72(action) + 72(visual)
+  hidden_dim: 96
+  output_dim: 80
 
 # 残差解码器参数
 decoder:
-  input_dim: 256
-  hidden_dim: 256
+  input_dim: 80
+  hidden_dim: 48
   output_dim: 180         # 30步 × 6维
   action_horizon: 30
   action_dim: 6
@@ -101,11 +110,11 @@ training:
   batch_size: 16
   learning_rate: 1e-4
   weight_decay: 1e-5
-  num_epochs: 100
+  num_epochs: 300
   device: "cuda"
-  validate_every: 3
+  validate_every: 1
   checkpoint_every: 10
-  checkpoint_dir: "/home/yang/TactileEncoder/residual_actmodel/checkpoints"
+  checkpoint_dir: "/home/yang/TactileEncoder/residual_actmodel/experiments/400_50hil_820_halfparams_full"
   log_every: 10
   diagnostic_topk: 3
   diagnostic_val_batches: 1
@@ -123,4 +132,19 @@ training:
     image: null  # 提供图像触觉统计文件；若输入已标准化，可使用匹配通道数的零均值/单位方差统计
   tactile_stats_path: "/home/yang/TactileEncoder/dataloader/util/tactile_analysis/tactile_stats.json"  # 兼容旧配置；仅在 tactile_stats_paths 缺失时回退
   tactile_input_already_normalized: false
-  reference_dropout: 0  # 训练时state和action各自独立置零的概率
+  action_noise_std: 0.0  # 仅训练时加入到ACT action chunk的高斯噪声标准差
+  current_force_noise_std: 0.05
+  state_noise_std: 0.05
+  temporal_smoothness_weight: 0.01
+  action_chunk_consistency_weight: 0.0
+  modality_dropout_prob: 0.0
+  ablate_modalities: []
+  current_force_gain_range: 0.0
+  overfit_monitor:
+    enabled: false
+    patience: 3
+    min_relative_test_increase: 0.01
+  reference_dropout: 0.03  # train阶段每个可训练参数元素置零的概率
+  adaptive_dropout_on_test_increase: true
+  test_mse_dropout_increase: 0
+  max_reference_dropout: 0

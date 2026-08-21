@@ -209,6 +209,24 @@ class CurrentForceEncoder(nn.Module):
         return torch.relu(self.output_norm(self.net(x)))
 
 
+class ForceFiLM(nn.Module):
+    """Condition fusion features on force context via feature-wise modulation."""
+
+    def __init__(self, condition_dim, feature_dim, hidden_dim=64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(condition_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, feature_dim * 2),
+        )
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, features, condition):
+        gamma, beta = self.net(condition).chunk(2, dim=-1)
+        return features * (1.0 + gamma) + beta
+
+
 
 class StateEncoder(nn.Module):
 
@@ -386,6 +404,7 @@ class TactileResidualACT(nn.Module):
         tactile_encoder_type="force",
         action_horizon=30,
         action_dim=6,
+        use_tactile_history=True,
         tactile_encoder_cfg=None,
         state_encoder_cfg=None,
         action_encoder_cfg=None,
@@ -403,6 +422,7 @@ class TactileResidualACT(nn.Module):
         current_force_mean=None,
         current_force_std=None,
         normalize_current_force_input=False,
+        force_film_cfg=None,
         use_act_visual=False,
         visual_encoder_cfg=None,
     ):
@@ -422,39 +442,46 @@ class TactileResidualACT(nn.Module):
         fusion_cfg = fusion_cfg or {}
         decoder_cfg = decoder_cfg or {}
         current_force_encoder_cfg = current_force_encoder_cfg or {}
+        force_film_cfg = force_film_cfg or {}
         visual_encoder_cfg = visual_encoder_cfg or {}
 
         # 是否启用ACT视觉token输入
         self.use_act_visual = bool(use_act_visual)
 
+        # 是否启用触觉历史输入（false=完全移除触觉历史分支）
+        self.use_tactile_history = bool(use_tactile_history)
+        tactile_input_dim = 0
+        tactile_output_dim = 0
+
         # 根据配置选择触觉编码器
-        if tactile_encoder_type == "force":
-            tactile_input_dim = int(tactile_encoder_cfg.get("input_dim", 12))
-            tactile_output_dim = int(tactile_encoder_cfg.get("output_dim", 256))
-            self.tactile_encoder = TactileForceEncoder(
-                input_dim=tactile_input_dim,
-                hidden_dim=int(tactile_encoder_cfg.get("hidden_dim", 64)),
-                output_dim=tactile_output_dim,
-            )
-        elif tactile_encoder_type == "image":
-            tactile_input_dim = int(tactile_encoder_cfg.get("in_channels", 6))
-            tactile_output_dim = int(tactile_encoder_cfg.get("output_dim", 256))
-            self.tactile_encoder = TactileImageEncoder(
-                in_channels=tactile_input_dim,
-                output_dim=tactile_output_dim,
-            )
-        elif tactile_encoder_type == "vqvae":
-            tactile_input_dim = int(tactile_encoder_cfg.get("input_dim", 12))
-            tactile_output_dim = int(tactile_encoder_cfg.get("output_dim", 256))
-            vqvae_checkpoint = tactile_encoder_cfg.get("vqvae_checkpoint_path")
-            if vqvae_checkpoint is None:
-                raise ValueError("vqvae_checkpoint_path is required when tactile_encoder_type='vqvae'")
-            self.tactile_encoder = VQVAEForceEncoder(
-                vqvae_checkpoint_path=vqvae_checkpoint,
-                freeze=tactile_encoder_cfg.get("freeze", True),
-            )
-        else:
-            raise ValueError(f"Unknown tactile_encoder_type: {tactile_encoder_type}. Choose 'force', 'image', or 'vqvae'.")
+        if self.use_tactile_history:
+            if tactile_encoder_type == "force":
+                tactile_input_dim = int(tactile_encoder_cfg.get("input_dim", 12))
+                tactile_output_dim = int(tactile_encoder_cfg.get("output_dim", 256))
+                self.tactile_encoder = TactileForceEncoder(
+                    input_dim=tactile_input_dim,
+                    hidden_dim=int(tactile_encoder_cfg.get("hidden_dim", 64)),
+                    output_dim=tactile_output_dim,
+                )
+            elif tactile_encoder_type == "image":
+                tactile_input_dim = int(tactile_encoder_cfg.get("in_channels", 6))
+                tactile_output_dim = int(tactile_encoder_cfg.get("output_dim", 256))
+                self.tactile_encoder = TactileImageEncoder(
+                    in_channels=tactile_input_dim,
+                    output_dim=tactile_output_dim,
+                )
+            elif tactile_encoder_type == "vqvae":
+                tactile_input_dim = int(tactile_encoder_cfg.get("input_dim", 12))
+                tactile_output_dim = int(tactile_encoder_cfg.get("output_dim", 256))
+                vqvae_checkpoint = tactile_encoder_cfg.get("vqvae_checkpoint_path")
+                if vqvae_checkpoint is None:
+                    raise ValueError("vqvae_checkpoint_path is required when tactile_encoder_type='vqvae'")
+                self.tactile_encoder = VQVAEForceEncoder(
+                    vqvae_checkpoint_path=vqvae_checkpoint,
+                    freeze=tactile_encoder_cfg.get("freeze", True),
+                )
+            else:
+                raise ValueError(f"Unknown tactile_encoder_type: {tactile_encoder_type}. Choose 'force', 'image', or 'vqvae'.")
 
         self.tactile_encoder_type = tactile_encoder_type
         self.normalize_tactile_input = bool(normalize_tactile_input)
@@ -467,6 +494,8 @@ class TactileResidualACT(nn.Module):
             dtype=torch.float32,
         ).reshape(-1)
         channel_names = list(tactile_channel_names or [])
+        if self.normalize_tactile_input and not self.use_tactile_history:
+            self.normalize_tactile_input = False
         if self.normalize_tactile_input:
             if mean.numel() != tactile_input_dim or std.numel() != tactile_input_dim:
                 raise ValueError(
@@ -607,6 +636,9 @@ class TactileResidualACT(nn.Module):
         fusion_input_dim = int(
             fusion_cfg.get("input_dim", expected_fusion_input_dim)
         )
+        if not self.use_tactile_history:
+            # 关闭触觉历史分支时，自动适配融合输入维度
+            fusion_input_dim = expected_fusion_input_dim
         if fusion_input_dim != expected_fusion_input_dim:
             raise ValueError(
                 "fusion.input_dim must equal tactile + current_force + state + action "
@@ -619,6 +651,14 @@ class TactileResidualACT(nn.Module):
             hidden_dim=int(fusion_cfg.get("hidden_dim", 512)),
             output_dim=fusion_output_dim,
         )
+        self.force_film_enabled = bool(force_film_cfg.get("enabled", False))
+        self.force_film = None
+        if self.force_film_enabled:
+            self.force_film = ForceFiLM(
+                condition_dim=current_force_output_dim,
+                feature_dim=fusion_output_dim,
+                hidden_dim=int(force_film_cfg.get("hidden_dim", 64)),
+            )
 
         decoder_output_dim = int(
             decoder_cfg.get(
@@ -658,36 +698,39 @@ class TactileResidualACT(nn.Module):
         return_feature_metrics=False,
     ):
 
-        if self.normalize_tactile_input:
-            if self.tactile_encoder_type == "force" or self.tactile_encoder_type == "vqvae":
-                expected_channels = self.tactile_channel_mean.numel()
-                if tactile_history.ndim != 3 or tactile_history.shape[-1] != expected_channels:
-                    raise ValueError(
-                        "Force tactile input must have shape [B, T, C] with "
-                        f"C={expected_channels}, got {tuple(tactile_history.shape)}."
-                    )
-                tactile_history = (
-                    tactile_history.to(torch.float32)
-                    - self.tactile_channel_mean.view(1, 1, -1)
-                ) / self.tactile_channel_std.view(1, 1, -1)
-            else:
-                expected_channels = self.tactile_channel_mean.numel()
-                if tactile_history.ndim != 5 or tactile_history.shape[2] != expected_channels:
-                    raise ValueError(
-                        "Image tactile input must have shape [B, T, C, H, W] with "
-                        f"C={expected_channels}, got {tuple(tactile_history.shape)}."
-                    )
-                tactile_history = (
-                    tactile_history.to(torch.float32)
-                    - self.tactile_channel_mean.view(1, 1, -1, 1, 1)
-                ) / self.tactile_channel_std.view(1, 1, -1, 1, 1)
-
-        # 获取触觉特征，VQ-VAE模式下同时获取token ID
         vqvae_token_id = None
-        if self.tactile_encoder_type == "vqvae":
-            tactile_feature, vqvae_token_id = self.tactile_encoder(tactile_history, return_token_id=True)
-        else:
-            tactile_feature = self.tactile_encoder(tactile_history)
+        tactile_feature = None
+
+        if self.use_tactile_history:
+            if self.normalize_tactile_input:
+                if self.tactile_encoder_type == "force" or self.tactile_encoder_type == "vqvae":
+                    expected_channels = self.tactile_channel_mean.numel()
+                    if tactile_history.ndim != 3 or tactile_history.shape[-1] != expected_channels:
+                        raise ValueError(
+                            "Force tactile input must have shape [B, T, C] with "
+                            f"C={expected_channels}, got {tuple(tactile_history.shape)}."
+                        )
+                    tactile_history = (
+                        tactile_history.to(torch.float32)
+                        - self.tactile_channel_mean.view(1, 1, -1)
+                    ) / self.tactile_channel_std.view(1, 1, -1)
+                else:
+                    expected_channels = self.tactile_channel_mean.numel()
+                    if tactile_history.ndim != 5 or tactile_history.shape[2] != expected_channels:
+                        raise ValueError(
+                            "Image tactile input must have shape [B, T, C, H, W] with "
+                            f"C={expected_channels}, got {tuple(tactile_history.shape)}."
+                        )
+                    tactile_history = (
+                        tactile_history.to(torch.float32)
+                        - self.tactile_channel_mean.view(1, 1, -1, 1, 1)
+                    ) / self.tactile_channel_std.view(1, 1, -1, 1, 1)
+
+            # 获取触觉特征，VQ-VAE模式下同时获取token ID
+            if self.tactile_encoder_type == "vqvae":
+                tactile_feature, vqvae_token_id = self.tactile_encoder(tactile_history, return_token_id=True)
+            else:
+                tactile_feature = self.tactile_encoder(tactile_history)
 
         # 处理当前力数据
         if self.normalize_current_force_input:
@@ -735,25 +778,22 @@ class TactileResidualACT(nn.Module):
             visual_feature = self.visual_encoder(act_visual_tokens)
 
 
-        feature=torch.cat(
-            [
-                tactile_feature,
-                current_force_feature,
-                state_feature,
-                action_feature,
-            ]
-            + ([visual_feature] if visual_feature is not None else []),
-            dim=-1
-        )
+        feature_list = []
+        if tactile_feature is not None:
+            feature_list.append(tactile_feature)
+        feature_list += [
+            current_force_feature,
+            state_feature,
+            action_feature,
+        ]
+        if visual_feature is not None:
+            feature_list.append(visual_feature)
+        feature = torch.cat(feature_list, dim=-1)
 
 
+        # Contributions live in the fusion hidden space, whose width is configurable.
         fusion_input_layer = self.fusion.encoder[0]
-        if fusion_input_layer.out_features != 512:
-            raise RuntimeError(
-                "Modality contribution vectors must be 512-D, got "
-                f"{fusion_input_layer.out_features}."
-            )
-        tactile_dim = tactile_feature.shape[-1]
+        tactile_dim = tactile_feature.shape[-1] if tactile_feature is not None else 0
         current_force_dim = current_force_feature.shape[-1]
         state_dim = state_feature.shape[-1]
         action_dim = action_feature.shape[-1]
@@ -767,10 +807,12 @@ class TactileResidualACT(nn.Module):
             )
 
         fusion_weight = fusion_input_layer.weight
-        c_t = torch.nn.functional.linear(
-            tactile_feature,
-            fusion_weight[:, :tactile_dim],
-        )
+        c_t = None
+        if tactile_feature is not None:
+            c_t = torch.nn.functional.linear(
+                tactile_feature,
+                fusion_weight[:, :tactile_dim],
+            )
         c_cf = torch.nn.functional.linear(
             current_force_feature,
             fusion_weight[
@@ -793,6 +835,7 @@ class TactileResidualACT(nn.Module):
                 tactile_dim + current_force_dim + state_dim + action_dim,
             ],
         )
+        h_pre = (c_t if c_t is not None else 0.0) + c_cf + c_s + c_a + fusion_input_layer.bias
         if visual_feature is not None:
             c_v = torch.nn.functional.linear(
                 visual_feature,
@@ -801,18 +844,20 @@ class TactileResidualACT(nn.Module):
                     tactile_dim + current_force_dim + state_dim + action_dim:,
                 ],
             )
-            h_pre = c_t + c_cf + c_s + c_a + c_v + fusion_input_layer.bias
-        else:
-            h_pre = c_t + c_cf + c_s + c_a + fusion_input_layer.bias
+            h_pre = h_pre + c_v
 
         z=self.fusion.encoder[1:](h_pre)
+        if self.force_film_enabled:
+            z = self.force_film(z, current_force_feature)
 
 
         delta_action=self.decoder(z)
 
         if return_feature_metrics:
-            contribution_list = [
-                c_t.norm(p=2, dim=-1),
+            contribution_list = []
+            if c_t is not None:
+                contribution_list.append(c_t.norm(p=2, dim=-1))
+            contribution_list += [
                 c_cf.norm(p=2, dim=-1),
                 c_s.norm(p=2, dim=-1),
                 c_a.norm(p=2, dim=-1),
@@ -826,30 +871,35 @@ class TactileResidualACT(nn.Module):
             contribution_ratios = contribution_norms / (
                 contribution_norms.sum(dim=-1, keepdim=True) + 1e-12
             )
-            feature_metrics = {
-                "tactile_encoder_rms": tactile_feature.square().mean(
+            contribution_index = 0
+            feature_metrics = {}
+            if tactile_feature is not None:
+                feature_metrics["tactile_encoder_rms"] = tactile_feature.square().mean(
                     dim=-1
-                ).sqrt().mean(),
-                "current_force_encoder_rms": current_force_feature.square().mean(
-                    dim=-1
-                ).sqrt().mean(),
-                "state_encoder_rms": state_feature.square().mean(
-                    dim=-1
-                ).sqrt().mean(),
-                "action_encoder_rms": action_feature.square().mean(
-                    dim=-1
-                ).sqrt().mean(),
-                "tactile_contribution_ratio": contribution_ratios[:, 0].mean(),
-                "current_force_contribution_ratio": contribution_ratios[:, 1].mean(),
-                "state_contribution_ratio": contribution_ratios[:, 2].mean(),
-                "action_contribution_ratio": contribution_ratios[:, 3].mean(),
-            }
+                ).sqrt().mean()
+                feature_metrics["tactile_contribution_ratio"] = contribution_ratios[:, contribution_index].mean()
+                contribution_index += 1
+            feature_metrics["current_force_encoder_rms"] = current_force_feature.square().mean(
+                dim=-1
+            ).sqrt().mean()
+            feature_metrics["state_encoder_rms"] = state_feature.square().mean(
+                dim=-1
+            ).sqrt().mean()
+            feature_metrics["action_encoder_rms"] = action_feature.square().mean(
+                dim=-1
+            ).sqrt().mean()
+            feature_metrics["current_force_contribution_ratio"] = contribution_ratios[:, contribution_index].mean()
+            contribution_index += 1
+            feature_metrics["state_contribution_ratio"] = contribution_ratios[:, contribution_index].mean()
+            contribution_index += 1
+            feature_metrics["action_contribution_ratio"] = contribution_ratios[:, contribution_index].mean()
+            contribution_index += 1
             if visual_feature is not None:
                 feature_metrics["visual_encoder_rms"] = (
                     visual_feature.square().mean(dim=-1).sqrt().mean()
                 )
                 feature_metrics["visual_contribution_ratio"] = (
-                    contribution_ratios[:, 4].mean()
+                    contribution_ratios[:, contribution_index].mean()
                 )
             # VQ-VAE模式下添加token ID
             if vqvae_token_id is not None:
@@ -1214,11 +1264,12 @@ class TactileMagnitudeWeightedMSE(nn.Module):
                 f"{tuple(pred_delta.shape)}."
             )
 
-        if tactile_history.shape[0] != pred_delta.shape[0]:
-            raise ValueError(
-                "Batch size mismatch between tactile_history and pred_delta."
-            )
-        self._validate_tactile_history(tactile_history)
+        if tactile_history is not None:
+            if tactile_history.shape[0] != pred_delta.shape[0]:
+                raise ValueError(
+                    "Batch size mismatch between tactile_history and pred_delta."
+                )
+            self._validate_tactile_history(tactile_history)
 
         if act_chunk is not None:
             self._check_tensor(
@@ -1271,6 +1322,10 @@ class TactileMagnitudeWeightedMSE(nn.Module):
                     metrics["state_contribution_ratio"] = feature_metrics["state_contribution_ratio"]
                 if "action_contribution_ratio" in feature_metrics:
                     metrics["action_contribution_ratio"] = feature_metrics["action_contribution_ratio"]
+                if "visual_contribution_ratio" in feature_metrics:
+                    metrics["visual_contribution_ratio"] = feature_metrics["visual_contribution_ratio"]
+                if "visual_encoder_rms" in feature_metrics:
+                    metrics["visual_encoder_rms"] = feature_metrics["visual_encoder_rms"]
 
                 # VQ-VAE token ID
                 if "vqvae_token_id" in feature_metrics:
@@ -1279,10 +1334,12 @@ class TactileMagnitudeWeightedMSE(nn.Module):
             return objective_loss, metrics
 
         # Force/Image模式：使用原有的magnitude-based weighting
-        tactile_magnitude, window_weights = (
-            self.compute_window_weights(
-                tactile_history
+        if tactile_history is None:
+            raise ValueError(
+                "tactile_history is required for force/image tactile loss."
             )
+        tactile_magnitude, window_weights = self.compute_window_weights(
+            tactile_history
         )
 
         if self.use_weighted_loss:
@@ -1372,6 +1429,8 @@ class TactileMagnitudeWeightedMSE(nn.Module):
             metrics["current_force_contribution_ratio"] = feature_metrics.get("current_force_contribution_ratio", torch.tensor(0.0))
             metrics["state_contribution_ratio"] = feature_metrics.get("state_contribution_ratio", torch.tensor(0.0))
             metrics["action_contribution_ratio"] = feature_metrics.get("action_contribution_ratio", torch.tensor(0.0))
+            metrics["visual_contribution_ratio"] = feature_metrics.get("visual_contribution_ratio", torch.tensor(0.0))
+            metrics["visual_encoder_rms"] = feature_metrics.get("visual_encoder_rms", torch.tensor(0.0))
 
         return objective_loss, metrics
 

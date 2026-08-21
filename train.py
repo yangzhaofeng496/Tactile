@@ -1,13 +1,16 @@
 import argparse
 import copy
+import csv
 import json
 import os
+import time
 import warnings
+from contextlib import contextmanager
 from pathlib import Path
 
 import torch
 import wandb
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.optim import AdamW
 from tqdm import tqdm
 
@@ -72,6 +75,10 @@ def log_compact_wandb_metrics(step, metrics):
         payload["train/modality_contribution/state"] = float(metrics["state_contribution_ratio"])
     if "current_force_contribution_ratio" in metrics:
         payload["train/modality_contribution/current_force"] = float(metrics["current_force_contribution_ratio"])
+    if "visual_contribution_ratio" in metrics:
+        payload["train/modality_contribution/act_encoder_latent"] = float(metrics["visual_contribution_ratio"])
+    if "visual_encoder_rms" in metrics:
+        payload["train/act_encoder_latent_rms"] = float(metrics["visual_encoder_rms"])
 
     # VQ-VAE token ID - 统计每个token ID的出现次数
     if "vqvae_token_id" in metrics:
@@ -122,12 +129,26 @@ def parse_args():
         action="store_true",
         help="Run one diagnostic pass without full training.",
     )
+    parser.add_argument(
+        "--ablate-modalities",
+        nargs="*",
+        default=None,
+        choices=["current_force", "state", "visual"],
+        help="Fixed modalities to zero during train/val/test.",
+    )
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=Path,
+        default=None,
+        help="Override training.checkpoint_dir for parallel experiments.",
+    )
     return parser.parse_args()
 
 
 def move_batch_to_device(batch, device):
     keys = [
         "tactile_history",
+        "current_force",
         "observation.state",
         "act_chunk",
         "expert_action",
@@ -143,6 +164,18 @@ def move_batch_to_device(batch, device):
                 non_blocking=True,
             )
     return output
+
+
+def apply_fixed_modality_ablation(batch, ablate_modalities):
+    """Zero selected conditioning modalities for a controlled ablation run."""
+    modalities = set(ablate_modalities or ())
+    if "current_force" in modalities:
+        batch["current_force"] = torch.zeros_like(batch["current_force"])
+    if "state" in modalities:
+        batch["observation.state"] = torch.zeros_like(batch["observation.state"])
+    if "visual" in modalities and batch.get("act_visual_tokens") is not None:
+        batch["act_visual_tokens"] = torch.zeros_like(batch["act_visual_tokens"])
+    return batch
 
 
 def init_metric_accumulator():
@@ -418,6 +451,18 @@ def load_and_validate_state_stats(model_config, action_dim):
     return stats
 
 
+def resolve_current_force_normalization(model_config, criterion_metadata):
+    cfg = model_config.get("current_force_encoder", {})
+    if not bool(cfg.get("normalize_input", False)):
+        return None, None, False
+    stats = criterion_metadata["stats_payload"]
+    return (
+        torch.tensor(stats["channel_mean"], dtype=torch.float32),
+        torch.tensor(stats["channel_std"], dtype=torch.float32),
+        True,
+    )
+
+
 def summarize_batch_metrics(metrics):
     result = {}
     for key, value in metrics.items():
@@ -442,6 +487,210 @@ def compute_grad_norm(parameters):
     return total ** 0.5
 
 
+def add_action_noise(action, std=0.0):
+    """Add zero-mean Gaussian noise to an action tensor without mutating it."""
+    std = float(std)
+    if std <= 0.0:
+        return action
+    return action + torch.randn_like(action) * std
+
+
+def add_relative_gaussian_noise(values, relative_std=0.0):
+    """Add batch-channel-scaled Gaussian noise without mutating the input."""
+    relative_std = float(relative_std)
+    if relative_std <= 0.0:
+        return values
+    scale = values.detach().to(torch.float32).std(dim=0, keepdim=True)
+    scale = scale.clamp_min(1e-6).to(dtype=values.dtype, device=values.device)
+    return values + torch.randn_like(values) * scale * relative_std
+
+
+def apply_modality_dropout(action_chunk, act_visual_tokens, drop_mask):
+    """Replace selected ACT reference modalities with zero vectors."""
+    keep = (~drop_mask).to(dtype=action_chunk.dtype)
+    action_shape = (action_chunk.shape[0],) + (1,) * (action_chunk.ndim - 1)
+    dropped_action = action_chunk * keep.reshape(action_shape)
+    if act_visual_tokens is None:
+        return dropped_action, None
+    visual_shape = (act_visual_tokens.shape[0],) + (1,) * (
+        act_visual_tokens.ndim - 1
+    )
+    dropped_visual = act_visual_tokens * keep.to(
+        dtype=act_visual_tokens.dtype
+    ).reshape(visual_shape)
+    return dropped_action, dropped_visual
+
+
+def add_random_gain(values, max_gain_change=0.0):
+    """Randomly scale each sample to simulate force-amplitude variation."""
+    max_gain_change = max(0.0, float(max_gain_change))
+    if max_gain_change <= 0.0:
+        return values
+    gains = torch.empty(
+        values.shape[0], 1,
+        device=values.device,
+        dtype=values.dtype,
+    ).uniform_(1.0 - max_gain_change, 1.0 + max_gain_change)
+    return values * gains
+
+
+class OverfitMonitor:
+    """Track epoch losses and detect sustained test degradation."""
+
+    def __init__(self, patience=3, min_relative_increase=0.01):
+        self.patience = max(1, int(patience))
+        self.min_relative_increase = max(0.0, float(min_relative_increase))
+        self.history = []
+        self.best_test_loss = float("inf")
+        self.best_val_loss = float("inf")
+        self.best_train_loss = float("inf")
+        self.rise_streak = 0
+        self.stop_reason = None
+
+    def update(self, train_loss, val_loss, test_loss):
+        epoch = len(self.history) + 1
+        train_loss = float(train_loss)
+        val_loss = float(val_loss)
+        test_loss = float(test_loss)
+        train_or_val_improved = (
+            train_loss < self.best_train_loss
+            or val_loss < self.best_val_loss
+        )
+
+        if test_loss < self.best_test_loss:
+            self.best_test_loss = test_loss
+            self.rise_streak = 0
+        elif (
+            test_loss > self.best_test_loss * (1.0 + self.min_relative_increase)
+        ):
+            self.rise_streak += 1
+        else:
+            self.rise_streak = 0
+
+        self.best_train_loss = min(self.best_train_loss, train_loss)
+        self.best_val_loss = min(self.best_val_loss, val_loss)
+        record = {
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            "test_loss": test_loss,
+            "best_test_loss": self.best_test_loss,
+            "rise_streak": self.rise_streak,
+        }
+        self.history.append(record)
+
+        if self.rise_streak >= self.patience and train_or_val_improved:
+            self.stop_reason = (
+                f"test_loss rose for {self.rise_streak} consecutive epochs; "
+                f"best_test_loss={self.best_test_loss:.6f}, "
+                f"current_test_loss={test_loss:.6f}"
+            )
+            return True
+        return False
+
+
+def persist_overfit_monitor(monitor, output_dir):
+    """Persist monitor history and a diagnostic loss plot."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = output_dir / "loss_history.csv"
+    with csv_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "epoch",
+                "train_loss",
+                "val_loss",
+                "test_loss",
+                "best_test_loss",
+                "rise_streak",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(monitor.history)
+
+    reason_path = output_dir / "stop_reason.json"
+    reason_path.write_text(
+        json.dumps(
+            {
+                "stop_reason": monitor.stop_reason,
+                "best_test_loss": monitor.best_test_loss,
+                "best_val_loss": monitor.best_val_loss,
+                "epochs_recorded": len(monitor.history),
+            },
+            indent=2,
+        )
+    )
+
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        epochs = [row["epoch"] for row in monitor.history]
+        plt.figure(figsize=(9, 5), dpi=160)
+        for key, label in (
+            ("train_loss", "Train"),
+            ("val_loss", "Validation"),
+            ("test_loss", "Test"),
+        ):
+            plt.plot(epochs, [row[key] for row in monitor.history], marker="o", label=label)
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+        plt.title("Residual ACT loss history")
+        plt.grid(alpha=0.25)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(output_dir / "loss_curve.png")
+        plt.close()
+    except Exception as exc:
+        (output_dir / "plot_error.txt").write_text(str(exc))
+
+
+@contextmanager
+def temporary_parameter_dropout(model, fraction):
+    """Temporarily zero a global fraction of trainable parameter elements."""
+    if fraction <= 0:
+        yield
+        return
+
+    parameters = [
+        parameter
+        for parameter in model.parameters()
+        if parameter.requires_grad and parameter.is_floating_point()
+    ]
+    total_parameters = sum(parameter.numel() for parameter in parameters)
+    num_to_zero = int(total_parameters * fraction)
+    saved = []
+
+    if num_to_zero > 0:
+        selected = torch.randperm(
+            total_parameters,
+            device=parameters[0].device,
+        )[:num_to_zero]
+        offset = 0
+        with torch.no_grad():
+            for parameter in parameters:
+                next_offset = offset + parameter.numel()
+                local_indices = selected[
+                    (selected >= offset) & (selected < next_offset)
+                ] - offset
+                if local_indices.numel() > 0:
+                    flat_parameter = parameter.reshape(-1)
+                    saved.append(
+                        (parameter, local_indices, flat_parameter[local_indices].clone())
+                    )
+                    flat_parameter[local_indices] = 0
+                offset = next_offset
+
+    try:
+        yield
+    finally:
+        with torch.no_grad():
+            for parameter, local_indices, original_values in saved:
+                parameter.reshape(-1)[local_indices] = original_values
+
+
 def safe_masked_mean(values, mask):
     if mask.any():
         return values[mask].mean()
@@ -463,7 +712,7 @@ def compute_batch_diagnostics(
     target_float = target_delta.detach().to(torch.float32)
     act_chunk = batch["act_chunk"].detach().to(torch.float32)
     expert_action = batch["expert_action"].detach().to(torch.float32)
-    tactile_history = batch["tactile_history"]
+    tactile_history = batch.get("tactile_history")
 
     squared_error = (pred_float - target_float).square()
     loss_per_window = squared_error.mean(dim=(1, 2))
@@ -474,13 +723,14 @@ def compute_batch_diagnostics(
         act_chunk - expert_action
     ).square().mean(dim=(1, 2))
 
-    tactile_magnitude, window_weights = criterion.compute_window_weights(
-        tactile_history
-    )
-    tactile_magnitude = tactile_magnitude.to(torch.float32)
-    window_weights = window_weights.to(torch.float32)
-    high_mask = tactile_magnitude >= criterion.tau.to(torch.float32)
-    low_mask = ~high_mask
+    if tactile_history is not None:
+        tactile_magnitude, window_weights = criterion.compute_window_weights(
+            tactile_history
+        )
+        tactile_magnitude = tactile_magnitude.to(torch.float32)
+        window_weights = window_weights.to(torch.float32)
+        high_mask = tactile_magnitude >= criterion.tau.to(torch.float32)
+        low_mask = ~high_mask
 
     topk_count = min(int(topk), int(loss_per_window.shape[0]))
     top_values, top_indices = torch.topk(
@@ -507,8 +757,16 @@ def compute_batch_diagnostics(
                     else None
                 ),
                 "loss_per_window": float(top_values[rank].item()),
-                "tactile_magnitude": float(tactile_magnitude[batch_index].item()),
-                "window_weight": float(window_weights[batch_index].item()),
+                "tactile_magnitude": (
+                    float(tactile_magnitude[batch_index].item())
+                    if tactile_history is not None
+                    else None
+                ),
+                "window_weight": (
+                    float(window_weights[batch_index].item())
+                    if tactile_history is not None
+                    else None
+                ),
             }
         )
 
@@ -525,25 +783,32 @@ def compute_batch_diagnostics(
         "loss_per_window_p95": torch.quantile(loss_per_window, 0.95),
         "act_expert_mse": act_expert_mse_per_window.mean(),
         "final_action_mse": final_action_mse_per_window.mean(),
-        "high_magnitude_final_action_mse": safe_masked_mean(
-            final_action_mse_per_window,
-            high_mask,
-        ),
-        "low_magnitude_final_action_mse": safe_masked_mean(
-            final_action_mse_per_window,
-            low_mask,
-        ),
-        "high_magnitude_target_delta_abs_mean": safe_masked_mean(
-            target_float.abs().mean(dim=(1, 2)),
-            high_mask,
-        ),
-        "low_magnitude_target_delta_abs_mean": safe_masked_mean(
-            target_float.abs().mean(dim=(1, 2)),
-            low_mask,
-        ),
-        "tactile_input_abs_mean": tactile_history.detach().to(torch.float32).abs().mean(),
-        "tactile_input_abs_max": tactile_history.detach().to(torch.float32).abs().max(),
     }
+    if tactile_history is not None:
+        diagnostics.update(
+            {
+                "high_magnitude_final_action_mse": safe_masked_mean(
+                    final_action_mse_per_window, high_mask
+                ),
+                "low_magnitude_final_action_mse": safe_masked_mean(
+                    final_action_mse_per_window, low_mask
+                ),
+                "high_magnitude_target_delta_abs_mean": safe_masked_mean(
+                    target_float.abs().mean(dim=(1, 2)), high_mask
+                ),
+                "low_magnitude_target_delta_abs_mean": safe_masked_mean(
+                    target_float.abs().mean(dim=(1, 2)), low_mask
+                ),
+                "tactile_input_abs_mean": tactile_history.detach()
+                .to(torch.float32)
+                .abs()
+                .mean(),
+                "tactile_input_abs_max": tactile_history.detach()
+                .to(torch.float32)
+                .abs()
+                .max(),
+            }
+        )
 
     for action_dim in range(target_float.shape[-1]):
         dim_target = target_float[:, :, action_dim]
@@ -569,24 +834,12 @@ def compute_losses(
     batch,
     reference_dropout=0.5,
 ):
-    tactile_history = batch["tactile_history"]
+    tactile_history = batch.get("tactile_history")
     current_force = batch["current_force"]
     state = batch["observation.state"]
     act_chunk = batch["act_chunk"]
     expert_action = batch["expert_action"]
     act_visual_tokens = batch.get("act_visual_tokens")
-
-    # 数据增强：以reference_dropout概率分别独立地将state和action置零
-    if model.training and reference_dropout > 0:
-        # state以reference_dropout概率置零
-        if torch.rand(1).item() < reference_dropout:
-            state = torch.zeros_like(state)
-        # action以reference_dropout概率置零
-        if torch.rand(1).item() < reference_dropout:
-            act_chunk = torch.zeros_like(act_chunk)
-            # ACT视觉token与act_chunk同源，一起置零
-            if act_visual_tokens is not None:
-                act_visual_tokens = torch.zeros_like(act_visual_tokens)
 
     pred_delta, feature_metrics = model(
         tactile_history,
@@ -613,6 +866,42 @@ def compute_losses(
     return objective_loss, metrics, pred_delta, target_delta
 
 
+def temporal_smoothness_loss(pred_action):
+    """Second-order smoothness penalty for predicted action chunks."""
+    if pred_action.shape[1] < 3:
+        return pred_action.new_zeros(())
+    second_difference = (
+        pred_action[:, 2:]
+        - 2.0 * pred_action[:, 1:-1]
+        + pred_action[:, :-2]
+    )
+    return second_difference.square().mean()
+
+
+def action_chunk_overlap_consistency_loss(
+    predicted_action,
+    absolute_indices,
+    episode_ids,
+):
+    """Penalize disagreement between overlapping predictions from adjacent windows."""
+    if predicted_action.shape[0] < 2 or predicted_action.shape[1] < 2:
+        return predicted_action.new_zeros(())
+
+    losses = []
+    for left in range(predicted_action.shape[0]):
+        for right in range(left + 1, predicted_action.shape[0]):
+            same_episode = episode_ids[left] == episode_ids[right]
+            adjacent = absolute_indices[right] == absolute_indices[left] + 1
+            if not (same_episode and adjacent):
+                continue
+            overlap = predicted_action[left, 1:] - predicted_action[right, :-1]
+            losses.append(overlap.square().mean())
+
+    if not losses:
+        return predicted_action.new_zeros(())
+    return torch.stack(losses).mean()
+
+
 def train_one_epoch(
     model,
     loader,
@@ -626,6 +915,14 @@ def train_one_epoch(
     wandb_log_every,
     overfit_single_batch_steps=0,
     reference_dropout=0.5,
+    action_noise_std=0.0,
+    current_force_noise_std=0.0,
+    current_force_gain_range=0.0,
+    state_noise_std=0.0,
+    temporal_smoothness_weight=0.0,
+    action_chunk_consistency_weight=0.0,
+    modality_dropout_prob=0.0,
+    ablate_modalities=None,
 ):
     model.train()
     metric_accumulator = init_metric_accumulator()
@@ -646,20 +943,69 @@ def train_one_epoch(
 
     for batch_idx, raw_batch in enumerate(pbar):
         batch = move_batch_to_device(raw_batch, device)
+        apply_fixed_modality_ablation(batch, ablate_modalities)
+        if action_noise_std > 0.0:
+            batch["act_chunk"] = add_action_noise(
+                batch["act_chunk"],
+                std=action_noise_std,
+            )
+        if current_force_noise_std > 0.0:
+            batch["current_force"] = add_relative_gaussian_noise(
+                batch["current_force"],
+                relative_std=current_force_noise_std,
+            )
+        if current_force_gain_range > 0.0:
+            batch["current_force"] = add_random_gain(
+                batch["current_force"],
+                max_gain_change=current_force_gain_range,
+            )
+        if state_noise_std > 0.0:
+            batch["observation.state"] = add_relative_gaussian_noise(
+                batch["observation.state"],
+                relative_std=state_noise_std,
+            )
+        if modality_dropout_prob > 0.0:
+            drop_mask = torch.rand(
+                batch["act_chunk"].shape[0],
+                device=batch["act_chunk"].device,
+            ) < modality_dropout_prob
+            if batch.get("act_visual_tokens") is not None:
+                visual = batch["act_visual_tokens"]
+                keep = (~drop_mask).to(dtype=visual.dtype)
+                visual_shape = (visual.shape[0],) + (1,) * (visual.ndim - 1)
+                batch["act_visual_tokens"] = visual * keep.reshape(
+                    visual_shape
+                )
         optimizer.zero_grad(set_to_none=True)
 
-        with autocast(enabled=device.type == "cuda"):
-            objective_loss, metrics, pred_delta, target_delta = compute_losses(
-                model=model,
-                criterion=criterion,
-                batch=batch,
-                reference_dropout=reference_dropout,
-            )
+        with temporary_parameter_dropout(model, reference_dropout):
+            with autocast(device_type=device.type, enabled=device.type == "cuda"):
+                objective_loss, metrics, pred_delta, target_delta = compute_losses(
+                    model=model,
+                    criterion=criterion,
+                    batch=batch,
+                )
+                if temporal_smoothness_weight > 0.0:
+                    predicted_action = batch["act_chunk"] + pred_delta
+                    objective_loss = objective_loss + (
+                        temporal_smoothness_weight
+                        * temporal_smoothness_loss(predicted_action)
+                    )
+                if action_chunk_consistency_weight > 0.0:
+                    predicted_action = batch["act_chunk"] + pred_delta
+                    objective_loss = objective_loss + (
+                        action_chunk_consistency_weight
+                        * action_chunk_overlap_consistency_loss(
+                            predicted_action,
+                            batch["absolute_index"],
+                            batch["episode_index"],
+                        )
+                    )
 
-        scaler.scale(objective_loss).backward()
-        grad_norm = compute_grad_norm(model.parameters())
-        scaler.step(optimizer)
-        scaler.update()
+            scaler.scale(objective_loss).backward()
+            grad_norm = compute_grad_norm(model.parameters())
+            scaler.step(optimizer)
+            scaler.update()
 
         metric_values = summarize_batch_metrics(metrics)
         diagnostic_values = compute_batch_diagnostics(
@@ -678,7 +1024,7 @@ def train_one_epoch(
                 if key != "top_examples"
             }
         )
-        batch_size = int(batch["tactile_history"].shape[0])
+        batch_size = int(batch["act_chunk"].shape[0])
         update_metric_accumulator(
             metric_accumulator,
             metric_values,
@@ -688,9 +1034,6 @@ def train_one_epoch(
         pbar.set_postfix(
             {
                 "loss": f"{float(objective_loss.detach().to(torch.float32).item()):.6f}",
-                "weighted": f"{metric_values.get('weighted_loss', 0.0):.6f}",
-                "unweighted": f"{metric_values.get('unweighted_loss', 0.0):.6f}",
-                "w_mean": f"{metric_values.get('weight_mean', 0.0):.3f}",
             }
         )
 
@@ -715,26 +1058,48 @@ def validate(
     use_weighted_loss,
     diagnostic_topk,
     max_batches=None,
+    desc="Val",
+    optimizer=None,
+    scaler=None,
+    update_weights=False,
+    reference_dropout=0.5,
+    ablate_modalities=None,
 ):
-    model.eval()
+    if update_weights and (optimizer is None or scaler is None):
+        raise ValueError(
+            "optimizer and scaler are required when update_weights=True."
+        )
+
+    if update_weights:
+        model.train()
+    else:
+        model.eval()
     metric_accumulator = init_metric_accumulator()
     pbar = tqdm(
         loader,
-        desc=f"Epoch {epoch} [Val]",
+        desc=f"Epoch {epoch} [{desc}]",
         leave=False,
     )
 
-    with torch.no_grad():
+    context = torch.enable_grad() if update_weights else torch.no_grad()
+    with context:
         for batch_idx, raw_batch in enumerate(pbar):
             if max_batches is not None and batch_idx >= max_batches:
                 break
             batch = move_batch_to_device(raw_batch, device)
-            with autocast(enabled=device.type == "cuda"):
-                _, metrics, pred_delta, target_delta = compute_losses(
+            apply_fixed_modality_ablation(batch, ablate_modalities)
+            if update_weights:
+                optimizer.zero_grad(set_to_none=True)
+            with autocast(device_type=device.type, enabled=device.type == "cuda"):
+                objective_loss, metrics, pred_delta, target_delta = compute_losses(
                     model=model,
                     criterion=criterion,
                     batch=batch,
                 )
+            if update_weights:
+                scaler.scale(objective_loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
             metric_values = summarize_batch_metrics(metrics)
             diagnostic_values = compute_batch_diagnostics(
                 batch=batch,
@@ -743,7 +1108,12 @@ def validate(
                 criterion=criterion,
                 topk=diagnostic_topk,
             )
-            metric_values["grad_norm"] = 0.0  # 验证时不计算梯度
+            metric_values["grad_norm"] = (
+                compute_grad_norm(model.parameters())
+                if update_weights
+                else 0.0
+            )
+            metric_values["objective_loss"] = float(objective_loss.detach().to(torch.float32).item())
             metric_values.update(
                 {
                     key: value
@@ -751,7 +1121,7 @@ def validate(
                     if key != "top_examples"
                 }
             )
-            batch_size = int(batch["tactile_history"].shape[0])
+            batch_size = int(batch["act_chunk"].shape[0])
             update_metric_accumulator(
                 metric_accumulator,
                 metric_values,
@@ -759,8 +1129,7 @@ def validate(
             )
             pbar.set_postfix(
                 {
-                    "weighted": f"{metric_values.get('weighted_loss', 0.0):.6f}",
-                    "unweighted": f"{metric_values.get('unweighted_loss', 0.0):.6f}",
+                    "loss": f"{float(objective_loss.detach().to(torch.float32).item()):.6f}",
                 }
             )
     epoch_metrics = finalize_metric_accumulator(
@@ -779,6 +1148,7 @@ def save_checkpoint(
     val_metrics,
     criterion,
     config_snapshot,
+    monitor_state=None,
 ):
     torch.save(
         {
@@ -800,6 +1170,7 @@ def save_checkpoint(
                 "channel_std": criterion.channel_std.detach().cpu(),
             },
             "config": config_snapshot,
+            "overfit_monitor": monitor_state,
         },
         path,
     )
@@ -844,10 +1215,13 @@ def maybe_resume_training(
     if checkpoint.get("val_metrics") is not None:
         best_val_loss = float(
             checkpoint["val_metrics"].get(
-                "weighted_loss",
+                "objective_loss",
                 checkpoint["val_metrics"].get(
-                    "unweighted_loss",
-                    float("inf"),
+                    "weighted_loss",
+                    checkpoint["val_metrics"].get(
+                        "unweighted_loss",
+                        float("inf"),
+                    ),
                 ),
             )
         )
@@ -886,6 +1260,10 @@ def main():
     dataloader_config = load_yaml(args.dataloader_config)
     model_config = load_yaml(args.model_config)
     training_cfg = model_config["training"]
+    if args.ablate_modalities is not None:
+        training_cfg["ablate_modalities"] = list(args.ablate_modalities)
+    if args.checkpoint_dir is not None:
+        training_cfg["checkpoint_dir"] = str(args.checkpoint_dir)
 
     set_seed(int(dataloader_config["split"]["seed"]))
     device = resolve_device(training_cfg)
@@ -1014,51 +1392,79 @@ def main():
         )
     )
 
-    dataset = build_base_dataset(dataloader_config)
-    normal_loaders, _ = build_normal_dataloaders(
-        dataloader_config,
-        dataset,
+    use_cache_loader = bool(
+        dataloader_config.get("use_cache_loader", False)
     )
-
     act_cache_path = dataloader_config["policy"].get("act_cache_path")
 
-    if act_cache_path:
-        # 使用离线预处理缓存：不再加载/运行ACT策略
-        print(f"使用ACT离线缓存: {act_cache_path}")
-        policy, preprocessor, postprocessor, act_device = (
-            None,
-            None,
-            None,
-            device,
-        )
-    else:
-        policy, preprocessor, postprocessor, act_device = (
-            load_lerobot_policy(
-                dataloader_config,
-                dataset,
+    if use_cache_loader:
+        # 完全缓存模式：从缓存读取所有训练输入，不加载LeRobotDataset/ACT策略
+        if not act_cache_path:
+            raise ValueError(
+                "use_cache_loader=true需要设置policy.act_cache_path。"
             )
+        print(f"[CacheLoader] 使用离线缓存: {act_cache_path}")
+        from dataloader.cache_loader import build_cached_loaders
+
+        loaders = build_cached_loaders(
+            dataloader_config,
+            act_cache_path,
+        )
+        train_loader = loaders["train"]
+        val_loader = loaders["val"]
+        test_loader = loaders.get("test")
+    else:
+        dataset = build_base_dataset(dataloader_config)
+        normal_loaders, _ = build_normal_dataloaders(
+            dataloader_config,
+            dataset,
         )
 
-    loaders = build_augmented_loaders(
-        dataloader_config,
-        normal_loaders,
-        policy,
-        preprocessor,
-        postprocessor,
-        act_device,
+        if act_cache_path:
+            # 使用离线预处理缓存：不再加载/运行ACT策略
+            print(f"使用ACT离线缓存: {act_cache_path}")
+            policy, preprocessor, postprocessor, act_device = (
+                None,
+                None,
+                None,
+                device,
+            )
+        else:
+            policy, preprocessor, postprocessor, act_device = (
+                load_lerobot_policy(
+                    dataloader_config,
+                    dataset,
+                )
+            )
+
+        loaders = build_augmented_loaders(
+            dataloader_config,
+            normal_loaders,
+            policy,
+            preprocessor,
+            postprocessor,
+            act_device,
+        )
+
+        train_loader = loaders["train"]
+        val_loader = loaders["val"]
+        test_loader = loaders.get("test")
+
+    current_force_mean, current_force_std, normalize_current_force = (
+        resolve_current_force_normalization(model_config, criterion_metadata)
     )
-
-    train_loader = loaders["train"]
-    val_loader = loaders["val"]
-
     model = TactileResidualACT(
         tactile_encoder_type=model_config["tactile_encoder"]["type"],
         action_horizon=model_action_horizon,
         action_dim=model_action_dim,
+        use_tactile_history=bool(
+            model_config["tactile_encoder"].get("enabled", True)
+        ),
         tactile_encoder_cfg=model_config["tactile_encoder"][tactile_type],
         state_encoder_cfg=model_config.get("state_encoder"),
         action_encoder_cfg=model_config.get("action_encoder"),
         current_force_encoder_cfg=model_config.get("current_force_encoder"),
+        force_film_cfg=model_config.get("force_film"),
         fusion_cfg=model_config.get("fusion"),
         decoder_cfg=decoder_cfg,
         tactile_channel_mean=criterion.channel_mean,
@@ -1071,6 +1477,9 @@ def main():
         normalize_state_input=bool(
             model_config["state_encoder"].get("normalize_input", True)
         ),
+        current_force_mean=current_force_mean,
+        current_force_std=current_force_std,
+        normalize_current_force_input=normalize_current_force,
         use_act_visual=bool(
             model_config.get("act_visual", {}).get("enabled", False)
         ),
@@ -1122,7 +1531,7 @@ def main():
         lr=float(training_cfg["learning_rate"]),
         weight_decay=float(training_cfg["weight_decay"]),
     )
-    scaler = GradScaler(enabled=device.type == "cuda")
+    scaler = GradScaler("cuda", enabled=device.type == "cuda")
 
     resume_checkpoint = (
         args.resume_checkpoint
@@ -1159,7 +1568,48 @@ def main():
     reference_dropout = float(
         training_cfg.get("reference_dropout", 0.5)
     )
+    action_noise_std = float(
+        training_cfg.get("action_noise_std", 0.0)
+    )
+    current_force_noise_std = float(
+        training_cfg.get("current_force_noise_std", 0.0)
+    )
+    current_force_gain_range = float(
+        training_cfg.get("current_force_gain_range", 0.0)
+    )
+    state_noise_std = float(training_cfg.get("state_noise_std", 0.0))
+    temporal_smoothness_weight = float(
+        training_cfg.get("temporal_smoothness_weight", 0.0)
+    )
+    action_chunk_consistency_weight = float(
+        training_cfg.get("action_chunk_consistency_weight", 0.0)
+    )
+    modality_dropout_prob = float(
+        training_cfg.get("modality_dropout_prob", 0.0)
+    )
+    ablate_modalities = list(training_cfg.get("ablate_modalities", []))
+    minimum_reference_dropout = reference_dropout
+    adaptive_dropout_on_test_increase = bool(
+        training_cfg.get("adaptive_dropout_on_test_increase", True)
+    )
+    dropout_increase = float(
+        training_cfg.get("test_mse_dropout_increase", 0.01)
+    )
+    max_reference_dropout = float(
+        training_cfg.get("max_reference_dropout", 0.5)
+    )
     checkpoint_dir = resolve_checkpoint_dir(training_cfg)
+    monitor_cfg = training_cfg.get("overfit_monitor", {})
+    monitor_enabled = bool(monitor_cfg.get("enabled", True))
+    overfit_monitor = OverfitMonitor(
+        patience=int(monitor_cfg.get("patience", 3)),
+        min_relative_increase=float(
+            monitor_cfg.get("min_relative_test_increase", 0.01)
+        ),
+    )
+    monitor_dir = checkpoint_dir / (
+        f"overfit_monitor_{time.strftime('%Y%m%d_%H%M%S')}"
+    )
 
     config_snapshot = {
         "dataloader_config": copy.deepcopy(dataloader_config),
@@ -1186,6 +1636,14 @@ def main():
             wandb_log_every=wandb_log_every,
             overfit_single_batch_steps=overfit_single_batch_steps,
             reference_dropout=reference_dropout,
+            action_noise_std=action_noise_std,
+            current_force_noise_std=current_force_noise_std,
+            current_force_gain_range=current_force_gain_range,
+            state_noise_std=state_noise_std,
+            temporal_smoothness_weight=temporal_smoothness_weight,
+            action_chunk_consistency_weight=action_chunk_consistency_weight,
+            modality_dropout_prob=modality_dropout_prob,
+            ablate_modalities=ablate_modalities,
         )
 
         if epoch % validate_every == 0:
@@ -1202,37 +1660,117 @@ def main():
                     if args.diagnostic_only
                     else None
                 ),
+                update_weights=False,
+                reference_dropout=reference_dropout,
+                ablate_modalities=ablate_modalities,
             )
-            val_loss = float(val_metrics.get("weighted_loss", val_metrics.get("unweighted_loss", 0.0)))
+            val_loss = float(val_metrics.get("objective_loss", 0.0))
+            safe_wandb_log(
+                {
+                    "epoch": epoch,
+                    "val/loss": val_loss,
+                }
+            )
+
+            test_metrics = None
+            if test_loader is not None:
+                test_metrics = validate(
+                    model=model,
+                    loader=test_loader,
+                    criterion=criterion,
+                    device=device,
+                    epoch=epoch,
+                    use_weighted_loss=use_weighted_loss,
+                    diagnostic_topk=diagnostic_topk,
+                    max_batches=(
+                        diagnostic_val_batches
+                        if args.diagnostic_only
+                        else None
+                    ),
+                    desc="Test",
+                    ablate_modalities=ablate_modalities,
+                )
+                test_loss = float(test_metrics.get("objective_loss", 0.0))
+                safe_wandb_log(
+                    {
+                        "epoch": epoch,
+                        "test/loss": test_loss,
+                    }
+                )
+
+                overfit_triggered = False
+                if monitor_enabled:
+                    overfit_triggered = overfit_monitor.update(
+                        train_loss=float(train_metrics.get("objective_loss", 0.0)),
+                        val_loss=val_loss,
+                        test_loss=test_loss,
+                    )
+                    persist_overfit_monitor(overfit_monitor, monitor_dir)
+                safe_wandb_log(
+                    {
+                        "epoch": epoch,
+                        "monitor/test_best_loss": overfit_monitor.best_test_loss,
+                        "monitor/test_rise_streak": overfit_monitor.rise_streak,
+                    }
+                )
+
             epoch_pbar.set_postfix(
                 {
-                    "train_w": f"{train_metrics.get('weighted_loss', 0.0):.6f}",
-                    "val_w": f"{val_loss:.6f}",
+                    "train_loss": f"{train_metrics.get('objective_loss', 0.0):.6f}",
+                    "val_loss": f"{val_loss:.6f}",
                 }
             )
             print(
                 f"epoch {epoch}/{epochs} "
-                f"train_weighted={train_metrics.get('weighted_loss', 0.0):.6f} "
-                f"train_unweighted={train_metrics.get('unweighted_loss', 0.0):.6f} "
-                f"val_weighted={val_metrics.get('weighted_loss', 0.0):.6f} "
-                f"val_unweighted={val_metrics.get('unweighted_loss', 0.0):.6f}"
+                f"train_loss={train_metrics.get('objective_loss', 0.0):.6f} "
+                f"val_loss={val_loss:.6f}"
+                + (
+                    f" test_loss={test_loss:.6f}"
+                    if test_metrics is not None
+                    else ""
+                )
             )
         else:
             val_metrics = None
             val_loss = None
             epoch_pbar.set_postfix(
                 {
-                    "train_w": f"{train_metrics.get('weighted_loss', 0.0):.6f}",
+                    "train_loss": f"{train_metrics.get('objective_loss', 0.0):.6f}",
                 }
             )
             print(
                 f"epoch {epoch}/{epochs} "
-                f"train_weighted={train_metrics.get('weighted_loss', 0.0):.6f} "
-                f"train_unweighted={train_metrics.get('unweighted_loss', 0.0):.6f}"
+                f"train_loss={train_metrics.get('objective_loss', 0.0):.6f}"
             )
 
         if args.diagnostic_only:
             print("Diagnostic-only run finished after one epoch.")
+            break
+
+        if test_metrics is not None and overfit_triggered:
+            stop_checkpoint_path = (
+                checkpoint_dir / f"checkpoint_overfit_epoch_{epoch}.pth"
+            )
+            save_checkpoint(
+                path=stop_checkpoint_path,
+                epoch=epoch,
+                model=model,
+                optimizer=optimizer,
+                scaler=scaler,
+                train_metrics=train_metrics,
+                val_metrics=val_metrics,
+                criterion=criterion,
+                config_snapshot=config_snapshot,
+                monitor_state={
+                    "history": overfit_monitor.history,
+                    "stop_reason": overfit_monitor.stop_reason,
+                },
+            )
+            safe_wandb_save(stop_checkpoint_path)
+            print(
+                "自动停止：检测到过拟合。"
+                f"原因：{overfit_monitor.stop_reason}"
+            )
             break
 
         if val_loss is not None and val_loss < best_val_loss:
@@ -1255,8 +1793,29 @@ def main():
             print(
                 "  → 保存最佳模型 "
                 f"{best_checkpoint_path} "
-                f"(val_weighted_loss={val_loss:.6f})"
+                f"(val_loss={val_loss:.6f})"
             )
+
+        latest_checkpoint_path = checkpoint_dir / "checkpoint_latest.pth"
+        save_checkpoint(
+            path=latest_checkpoint_path,
+            epoch=epoch,
+            model=model,
+            optimizer=optimizer,
+            scaler=scaler,
+            train_metrics=train_metrics,
+            val_metrics=val_metrics,
+            criterion=criterion,
+            config_snapshot=config_snapshot,
+            monitor_state=(
+                {
+                    "history": overfit_monitor.history,
+                    "stop_reason": overfit_monitor.stop_reason,
+                }
+                if monitor_enabled and test_metrics is not None
+                else None
+            ),
+        )
 
         if epoch % checkpoint_every == 0:
             checkpoint_path = (
