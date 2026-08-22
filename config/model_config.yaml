@@ -93,17 +93,21 @@ force_film:
 
 # 融合模块参数
 fusion:
+  type: "multihead"
   input_dim: 216           # 36(current_force) + 36(state) + 72(action) + 72(visual)
   hidden_dim: 96
   output_dim: 80
+  num_heads: 8
+  dropout: 0.1
 
 # 残差解码器参数
 decoder:
   input_dim: 80
   hidden_dim: 48
-  output_dim: 180         # 30步 × 6维
+  output_dim: 180         # 30步 × 6轴delta
   action_horizon: 30
   action_dim: 6
+  single_step_delta: false
 
 # 训练参数
 training:
@@ -114,7 +118,7 @@ training:
   device: "cuda"
   validate_every: 1
   checkpoint_every: 10
-  checkpoint_dir: "/home/yang/TactileEncoder/residual_actmodel/experiments/400_50hil_820_halfparams_full"
+  checkpoint_dir: "/home/yang/TactileEncoder/residual_actmodel/experiments/400_50hil_820_halfparams_full_head8"
   log_every: 10
   diagnostic_topk: 3
   diagnostic_val_batches: 1

@@ -66,17 +66,15 @@ def log_compact_wandb_metrics(step, metrics):
     if "unweighted_loss" in metrics:
         payload["train/unweight_loss"] = float(metrics["unweighted_loss"])
 
-    # Modality contribution
-    if "action_contribution_ratio" in metrics:
-        payload["train/modality_contribution/action"] = float(metrics["action_contribution_ratio"])
-    if "tactile_contribution_ratio" in metrics:
-        payload["train/modality_contribution/tactile"] = float(metrics["tactile_contribution_ratio"])
-    if "state_contribution_ratio" in metrics:
-        payload["train/modality_contribution/state"] = float(metrics["state_contribution_ratio"])
-    if "current_force_contribution_ratio" in metrics:
-        payload["train/modality_contribution/current_force"] = float(metrics["current_force_contribution_ratio"])
-    if "visual_contribution_ratio" in metrics:
-        payload["train/modality_contribution/act_encoder_latent"] = float(metrics["visual_contribution_ratio"])
+    if "fusion_head_weights" in metrics:
+        for i, value in enumerate(metrics["fusion_head_weights"]):
+            payload[f"fusion/head_weight/head_{i}"] = float(value)
+    if "fusion_modality_weights" in metrics:
+        names = ["current_force", "state", "action_chunk", "visual"]
+        weights = metrics["fusion_modality_weights"]
+        for head_idx, row in enumerate(weights):
+            for name, value in zip(names, row):
+                payload[f"fusion/head_modality_weight/head_{head_idx}/{name}"] = float(value)
     if "visual_encoder_rms" in metrics:
         payload["train/act_encoder_latent_rms"] = float(metrics["visual_encoder_rms"])
 
@@ -853,6 +851,8 @@ def compute_losses(
         expert_action,
         act_chunk,
     )
+    if pred_delta.ndim == 2:
+        target_delta = target_delta[:, 0, :]
 
     objective_loss, metrics = criterion(
         pred_delta=pred_delta,

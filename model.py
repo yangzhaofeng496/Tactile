@@ -313,6 +313,50 @@ class FusionEncoder(nn.Module):
         return self.encoder(x)
 
 
+class MultiHeadFusionEncoder(nn.Module):
+    """Single-layer normalized multi-head modality fusion."""
+
+    def __init__(self, input_dim, hidden_dim, output_dim, num_heads=4, dropout=0.1):
+        super().__init__()
+        if hidden_dim % num_heads != 0:
+            raise ValueError("fusion hidden_dim must be divisible by num_heads")
+        self.num_heads = int(num_heads)
+        self.heads = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(input_dim, hidden_dim),
+                nn.GELU(),
+                nn.LayerNorm(hidden_dim),
+                nn.Dropout(dropout),
+            ) for _ in range(self.num_heads)
+        ])
+        self.head_weights = nn.Parameter(torch.zeros(self.num_heads))
+        self.modality_weights = nn.Parameter(torch.zeros(self.num_heads, 4))
+        self.merge_norm = nn.LayerNorm(hidden_dim)
+        self.skip = nn.Linear(input_dim, hidden_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_dim, output_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(output_dim, output_dim),
+        )
+        self.output_norm = nn.LayerNorm(output_dim)
+        self.output_skip = nn.Linear(hidden_dim, output_dim)
+
+    def forward(self, x, return_attention=False):
+        heads = torch.stack([head(x) for head in self.heads], dim=1)
+        weights = torch.softmax(self.head_weights, dim=0).view(1, self.num_heads, 1)
+        merged = self.merge_norm((heads * weights).sum(dim=1))
+        residual = self.skip(x)
+        fused = self.merge_norm(merged + residual)
+        output = self.output_norm(self.ffn(fused) + self.output_skip(fused))
+        if return_attention:
+            return output, {
+                "head_weights": torch.softmax(self.head_weights, dim=0),
+                "modality_weights": torch.softmax(self.modality_weights, dim=-1),
+            }
+        return output
+
+
 
 class VisualTokenEncoder(nn.Module):
     """
@@ -646,11 +690,19 @@ class TactileResidualACT(nn.Module):
                 f"{fusion_input_dim} vs {expected_fusion_input_dim}."
             )
         fusion_output_dim = int(fusion_cfg.get("output_dim", 256))
-        self.fusion = FusionEncoder(
-            input_dim=fusion_input_dim,
-            hidden_dim=int(fusion_cfg.get("hidden_dim", 512)),
-            output_dim=fusion_output_dim,
-        )
+        fusion_type = fusion_cfg.get("type", "mlp")
+        fusion_cls = MultiHeadFusionEncoder if fusion_type == "multihead" else FusionEncoder
+        fusion_kwargs = {
+            "input_dim": fusion_input_dim,
+            "hidden_dim": int(fusion_cfg.get("hidden_dim", 512)),
+            "output_dim": fusion_output_dim,
+        }
+        if fusion_cls is MultiHeadFusionEncoder:
+            fusion_kwargs.update(
+                num_heads=int(fusion_cfg.get("num_heads", 4)),
+                dropout=float(fusion_cfg.get("dropout", 0.1)),
+            )
+        self.fusion = fusion_cls(**fusion_kwargs)
         self.force_film_enabled = bool(force_film_cfg.get("enabled", False))
         self.force_film = None
         if self.force_film_enabled:
@@ -660,13 +712,14 @@ class TactileResidualACT(nn.Module):
                 hidden_dim=int(force_film_cfg.get("hidden_dim", 64)),
             )
 
+        self.single_step_delta = bool(decoder_cfg.get("single_step_delta", False))
         decoder_output_dim = int(
             decoder_cfg.get(
                 "output_dim",
                 expected_action_input_dim,
             )
         )
-        if decoder_output_dim != expected_action_input_dim:
+        if not self.single_step_delta and decoder_output_dim != expected_action_input_dim:
             raise ValueError(
                 "decoder.output_dim must equal "
                 "decoder.action_horizon * decoder.action_dim: "
@@ -683,7 +736,7 @@ class TactileResidualACT(nn.Module):
         self.decoder = ResidualDecoder(
             input_dim=decoder_input_dim,
             hidden_dim=int(decoder_cfg.get("hidden_dim", 256)),
-            action_horizon=self.action_horizon,
+            action_horizon=1 if self.single_step_delta else self.action_horizon,
             action_dim=self.action_dim,
         )
 
@@ -792,51 +845,73 @@ class TactileResidualACT(nn.Module):
 
 
         # Contributions live in the fusion hidden space, whose width is configurable.
-        fusion_input_layer = self.fusion.encoder[0]
-        tactile_dim = tactile_feature.shape[-1] if tactile_feature is not None else 0
+        if isinstance(self.fusion, MultiHeadFusionEncoder):
+            z, fusion_attention = self.fusion(feature, return_attention=return_feature_metrics)
+            c_t = tactile_feature
+            c_cf = current_force_feature
+            c_s = state_feature
+            c_a = action_feature
+            c_v = visual_feature
+        else:
+            fusion_input_layer = self.fusion.encoder[0]
+        if isinstance(self.fusion, MultiHeadFusionEncoder):
+            tactile_dim = tactile_feature.shape[-1] if tactile_feature is not None else 0
+            expected_fusion_dim = feature.shape[-1]
+        else:
+            tactile_dim = tactile_feature.shape[-1] if tactile_feature is not None else 0
         current_force_dim = current_force_feature.shape[-1]
         state_dim = state_feature.shape[-1]
         action_dim = action_feature.shape[-1]
         expected_fusion_dim = tactile_dim + current_force_dim + state_dim + action_dim
         if visual_feature is not None:
             expected_fusion_dim += visual_feature.shape[-1]
-        if fusion_input_layer.in_features != expected_fusion_dim:
+        if not isinstance(self.fusion, MultiHeadFusionEncoder) and fusion_input_layer.in_features != expected_fusion_dim:
             raise RuntimeError(
                 "Fusion input dimensions do not match encoded modality dimensions: "
                 f"{fusion_input_layer.in_features} vs {expected_fusion_dim}."
             )
 
-        fusion_weight = fusion_input_layer.weight
-        c_t = None
-        if tactile_feature is not None:
+        if isinstance(self.fusion, MultiHeadFusionEncoder):
+            fusion_weight = None
+        else:
+            fusion_weight = fusion_input_layer.weight
+        if isinstance(self.fusion, MultiHeadFusionEncoder):
+            pass
+        else:
+            c_t = None
+        if not isinstance(self.fusion, MultiHeadFusionEncoder) and tactile_feature is not None:
             c_t = torch.nn.functional.linear(
                 tactile_feature,
                 fusion_weight[:, :tactile_dim],
             )
-        c_cf = torch.nn.functional.linear(
+        if not isinstance(self.fusion, MultiHeadFusionEncoder):
+          c_cf = torch.nn.functional.linear(
             current_force_feature,
             fusion_weight[
                 :,
                 tactile_dim:tactile_dim + current_force_dim,
             ],
-        )
-        c_s = torch.nn.functional.linear(
+          )
+        if not isinstance(self.fusion, MultiHeadFusionEncoder):
+          c_s = torch.nn.functional.linear(
             state_feature,
             fusion_weight[
                 :,
                 tactile_dim + current_force_dim:tactile_dim + current_force_dim + state_dim,
             ],
-        )
-        c_a = torch.nn.functional.linear(
+          )
+        if not isinstance(self.fusion, MultiHeadFusionEncoder):
+          c_a = torch.nn.functional.linear(
             action_feature,
             fusion_weight[
                 :,
                 tactile_dim + current_force_dim + state_dim:
                 tactile_dim + current_force_dim + state_dim + action_dim,
             ],
-        )
-        h_pre = (c_t if c_t is not None else 0.0) + c_cf + c_s + c_a + fusion_input_layer.bias
-        if visual_feature is not None:
+          )
+        if not isinstance(self.fusion, MultiHeadFusionEncoder):
+          h_pre = (c_t if c_t is not None else 0.0) + c_cf + c_s + c_a + fusion_input_layer.bias
+        if not isinstance(self.fusion, MultiHeadFusionEncoder) and visual_feature is not None:
             c_v = torch.nn.functional.linear(
                 visual_feature,
                 fusion_weight[
@@ -846,14 +921,24 @@ class TactileResidualACT(nn.Module):
             )
             h_pre = h_pre + c_v
 
-        z=self.fusion.encoder[1:](h_pre)
+        if not isinstance(self.fusion, MultiHeadFusionEncoder):
+          z=self.fusion.encoder[1:](h_pre)
         if self.force_film_enabled:
             z = self.force_film(z, current_force_feature)
 
 
         delta_action=self.decoder(z)
+        if self.single_step_delta:
+            delta_action = delta_action[:, 0, :]
 
         if return_feature_metrics:
+            if isinstance(self.fusion, MultiHeadFusionEncoder):
+                feature_metrics = {
+                    "fusion_head_weights": fusion_attention["head_weights"],
+                    "fusion_modality_weights": fusion_attention["modality_weights"],
+                }
+            else:
+                feature_metrics = {}
             contribution_list = []
             if c_t is not None:
                 contribution_list.append(c_t.norm(p=2, dim=-1))
@@ -872,7 +957,6 @@ class TactileResidualACT(nn.Module):
                 contribution_norms.sum(dim=-1, keepdim=True) + 1e-12
             )
             contribution_index = 0
-            feature_metrics = {}
             if tactile_feature is not None:
                 feature_metrics["tactile_encoder_rms"] = tactile_feature.square().mean(
                     dim=-1
@@ -1326,6 +1410,10 @@ class TactileMagnitudeWeightedMSE(nn.Module):
                     metrics["visual_contribution_ratio"] = feature_metrics["visual_contribution_ratio"]
                 if "visual_encoder_rms" in feature_metrics:
                     metrics["visual_encoder_rms"] = feature_metrics["visual_encoder_rms"]
+                if "fusion_head_weights" in feature_metrics:
+                    metrics["fusion_head_weights"] = feature_metrics["fusion_head_weights"]
+                if "fusion_modality_weights" in feature_metrics:
+                    metrics["fusion_modality_weights"] = feature_metrics["fusion_modality_weights"]
 
                 # VQ-VAE token ID
                 if "vqvae_token_id" in feature_metrics:
