@@ -1479,6 +1479,9 @@ def main():
         tactile_cfg["enabled"] = True
         tactile_cfg["type"] = "force"
         tactile_cfg.setdefault("force", {})["input_dim"] = 12
+        dataloader_config.setdefault("dataset", {}).setdefault("keys", {})[
+            "tactile_type"
+        ] = "force"
     if args.action_calibrator_only:
         decoder_cfg = model_config.setdefault("decoder", {})
         decoder_cfg["use_action_calibrator"] = True
