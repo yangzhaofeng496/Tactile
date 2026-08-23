@@ -236,6 +236,11 @@ def parse_args():
         action="store_true",
         help="Use the optional Residual Diffusion Transformer decoder.",
     )
+    parser.add_argument(
+        "--action-calibrator",
+        action="store_true",
+        help="Enable a per-horizon/per-axis affine calibration of ACT actions.",
+    )
     return parser.parse_args()
 
 
@@ -973,13 +978,8 @@ def compute_losses(
         metrics["diffusion_x0_loss"] = feature_metrics["diffusion_x0_loss"].detach()
         if model.training:
             objective_loss = feature_metrics["diffusion_loss"]
-    if (
-        not model.training
-        and getattr(model, "use_diffusion_residual", False)
-        and "final_action_mse" in metrics
-    ):
-        # Diffusion validation is evaluated in absolute-action space:
-        # MSE(expert_action, act_chunk + predicted_delta).
+    if not model.training and "final_action_mse" in metrics:
+        # All variants select checkpoints by absolute-action MSE.
         objective_loss = metrics["final_action_mse"]
 
     return objective_loss, metrics, pred_delta, target_delta
@@ -1455,6 +1455,8 @@ def main():
         fusion_cfg["use_gate"] = False
         fusion_cfg["use_modality_gate"] = False
         fusion_cfg["use_timestep_modality_gate"] = False
+    if args.action_calibrator:
+        model_config.setdefault("decoder", {})["use_action_calibrator"] = True
 
     set_seed(int(dataloader_config["split"]["seed"]))
     device = resolve_device(training_cfg)

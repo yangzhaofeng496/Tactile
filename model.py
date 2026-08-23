@@ -858,6 +858,18 @@ class ResidualDiffusionDecoder(nn.Module):
         return x
 
 
+class ActionChunkAffineCalibrator(nn.Module):
+    """Learn a stable per-horizon/per-axis affine calibration of ACT actions."""
+
+    def __init__(self, horizon=30, action_dim=6):
+        super().__init__()
+        self.scale = nn.Parameter(torch.ones(1, horizon, action_dim))
+        self.bias = nn.Parameter(torch.zeros(1, horizon, action_dim))
+
+    def forward(self, act_chunk):
+        return self.scale * act_chunk + self.bias
+
+
 
 class TactileResidualACT(nn.Module):
 
@@ -1289,6 +1301,12 @@ class TactileResidualACT(nn.Module):
                 x0_loss_weight=float(decoder_cfg.get("diffusion_x0_loss_weight", 0.1)),
                 validation_seed=int(decoder_cfg.get("diffusion_validation_seed", 1234)),
             )
+        self.action_calibrator = None
+        if bool(decoder_cfg.get("use_action_calibrator", False)):
+            self.action_calibrator = ActionChunkAffineCalibrator(
+                horizon=self.action_horizon,
+                action_dim=self.action_dim,
+            )
 
 
     def forward(
@@ -1546,6 +1564,9 @@ class TactileResidualACT(nn.Module):
                 x0_loss = None
         else:
             delta_action = self.decoder(z)
+        if self.action_calibrator is not None:
+            calibrated_action = self.action_calibrator(act_chunk)
+            delta_action = delta_action + calibrated_action - act_chunk
         if self.single_step_delta:
             delta_action = delta_action[:, 0, :]
 
@@ -2086,6 +2107,11 @@ class TactileMagnitudeWeightedMSE(nn.Module):
                 # VQ-VAE token ID
                 if "vqvae_token_id" in feature_metrics:
                     metrics["vqvae_token_id"] = feature_metrics["vqvae_token_id"]
+            if act_chunk is not None and expert_action is not None:
+                metrics["final_action_mse"] = (
+                    pred_float + act_chunk.to(torch.float32)
+                    - expert_action.to(torch.float32)
+                ).square().mean().detach()
 
             return objective_loss, metrics
 

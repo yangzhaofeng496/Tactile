@@ -126,6 +126,7 @@ decoder:
   action_horizon: 30
   action_dim: 6
   single_step_delta: false
+  use_action_calibrator: false  # 可回溯：ACT时步/动作轴 affine systematic correction
 
 # 训练参数
 training:
