@@ -645,14 +645,16 @@ class FactorizedResidualDecoder(nn.Module):
     """Use one small magnitude/direction decoder independently per action axis."""
 
     def __init__(self, input_dim, hidden_dim=256, action_horizon=30,
-                 action_dim=6, per_step=False):
+                 action_dim=6, per_step=False, independent_axes=True):
         super().__init__()
         self.action_horizon = int(action_horizon)
         self.action_dim = int(action_dim)
         self.per_step = bool(per_step)
+        self.independent_axes = bool(independent_axes)
         output_dim = 2 * (1 if self.per_step else self.action_horizon)
+        decoder_count = self.action_dim if self.independent_axes else 1
         self.axis_decoders = nn.ModuleList()
-        for _ in range(self.action_dim):
+        for _ in range(decoder_count):
             decoder = nn.Sequential(
                 nn.Linear(input_dim, hidden_dim),
                 nn.ReLU(),
@@ -671,12 +673,16 @@ class FactorizedResidualDecoder(nn.Module):
             if x.ndim != 3:
                 raise ValueError(f"factorized decoder expects [B, T, D], got {tuple(x.shape)}")
             raw = torch.stack([decoder(x) for decoder in self.axis_decoders], dim=-1)
+            if not self.independent_axes:
+                raw = raw.expand(*raw.shape[:-1], self.action_dim)
             magnitude, direction = raw[..., 0, :], raw[..., 1, :]
             return torch.nn.functional.softplus(magnitude) * torch.tanh(direction)
         else:
             if x.ndim != 2:
                 raise ValueError(f"factorized decoder expects [B, D], got {tuple(x.shape)}")
             raw = torch.stack([decoder(x) for decoder in self.axis_decoders], dim=-1)
+            if not self.independent_axes:
+                raw = raw.expand(*raw.shape[:-1], self.action_dim)
             raw = raw.reshape(x.shape[0], self.action_horizon, 2, self.action_dim)
             magnitude, direction = raw[:, :, 0], raw[:, :, 1]
         return torch.nn.functional.softplus(magnitude) * torch.tanh(direction)
@@ -1327,6 +1333,7 @@ class TactileResidualACT(nn.Module):
                 action_horizon=1 if self.single_step_delta else self.action_horizon,
                 action_dim=self.action_dim,
                 per_step=decoder_per_step,
+                independent_axes=bool(decoder_cfg.get("factorized_independent_axes", True)),
             )
         else:
             self.decoder = ResidualDecoder(
