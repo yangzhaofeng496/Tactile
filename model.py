@@ -641,6 +641,42 @@ class ResidualDecoder(nn.Module):
         return x.reshape(B, self.action_horizon, self.action_dim)
 
 
+class FactorizedResidualDecoder(nn.Module):
+    """Predict per-axis magnitude and direction, then compose a delta action."""
+
+    def __init__(self, input_dim, hidden_dim=256, action_horizon=30,
+                 action_dim=6, per_step=False):
+        super().__init__()
+        self.action_horizon = int(action_horizon)
+        self.action_dim = int(action_dim)
+        self.per_step = bool(per_step)
+        output_dim = self.action_dim * 2 * (1 if self.per_step else self.action_horizon)
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, output_dim),
+        )
+        with torch.no_grad():
+            bias = self.net[-1].bias.view(
+                1 if self.per_step else self.action_horizon,
+                self.action_dim * 2,
+            )
+            bias[:, :self.action_dim].fill_(-2.0)
+            bias[:, self.action_dim:].zero_()
+
+    def forward(self, x):
+        if self.per_step:
+            if x.ndim != 3:
+                raise ValueError(f"factorized decoder expects [B, T, D], got {tuple(x.shape)}")
+            raw = self.net(x)
+        else:
+            if x.ndim != 2:
+                raise ValueError(f"factorized decoder expects [B, D], got {tuple(x.shape)}")
+            raw = self.net(x).reshape(x.shape[0], self.action_horizon, self.action_dim * 2)
+        magnitude, direction = raw.split(self.action_dim, dim=-1)
+        return torch.nn.functional.softplus(magnitude) * torch.tanh(direction)
+
+
 class TimestepModalityGate(nn.Module):
     """Generate a modality mixture separately for every action step."""
 
@@ -1128,6 +1164,9 @@ class TactileResidualACT(nn.Module):
                 f"{fusion_input_dim} vs {expected_fusion_input_dim}."
             )
         fusion_output_dim = int(fusion_cfg.get("output_dim", 256))
+        self.use_factorized_delta_decoder = bool(
+            decoder_cfg.get("use_factorized_delta_decoder", False)
+        )
         fusion_type = fusion_cfg.get("type", "mlp")
         self.fusion_returns_sequence = fusion_type in {
             "residual_transformer", "residual_diffusion_transformer"
@@ -1275,17 +1314,27 @@ class TactileResidualACT(nn.Module):
                 ),
             )
 
-        self.decoder = ResidualDecoder(
-            input_dim=decoder_input_dim,
-            hidden_dim=int(decoder_cfg.get("hidden_dim", 256)),
-            action_horizon=1 if self.single_step_delta else self.action_horizon,
-            action_dim=self.action_dim,
-            per_step=(self.use_timestep_modality_gate or self.fusion_returns_sequence),
-            temporal=bool(decoder_cfg.get("use_temporal_decoder", False)),
-            temporal_num_heads=int(decoder_cfg.get("temporal_num_heads", 4)),
-            temporal_ffn_dim=int(decoder_cfg.get("temporal_ffn_dim", 128)),
-            dropout=float(decoder_cfg.get("dropout", 0.1)),
-        )
+        decoder_per_step = self.use_timestep_modality_gate or self.fusion_returns_sequence
+        if self.use_factorized_delta_decoder:
+            self.decoder = FactorizedResidualDecoder(
+                input_dim=decoder_input_dim,
+                hidden_dim=int(decoder_cfg.get("hidden_dim", 256)),
+                action_horizon=1 if self.single_step_delta else self.action_horizon,
+                action_dim=self.action_dim,
+                per_step=decoder_per_step,
+            )
+        else:
+            self.decoder = ResidualDecoder(
+                input_dim=decoder_input_dim,
+                hidden_dim=int(decoder_cfg.get("hidden_dim", 256)),
+                action_horizon=1 if self.single_step_delta else self.action_horizon,
+                action_dim=self.action_dim,
+                per_step=decoder_per_step,
+                temporal=bool(decoder_cfg.get("use_temporal_decoder", False)),
+                temporal_num_heads=int(decoder_cfg.get("temporal_num_heads", 4)),
+                temporal_ffn_dim=int(decoder_cfg.get("temporal_ffn_dim", 128)),
+                dropout=float(decoder_cfg.get("dropout", 0.1)),
+            )
         self.diffusion_decoder = None
         if self.use_diffusion_residual:
             self.diffusion_decoder = ResidualDiffusionDecoder(
