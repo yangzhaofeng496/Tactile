@@ -973,6 +973,14 @@ def compute_losses(
         metrics["diffusion_x0_loss"] = feature_metrics["diffusion_x0_loss"].detach()
         if model.training:
             objective_loss = feature_metrics["diffusion_loss"]
+    if (
+        not model.training
+        and getattr(model, "use_diffusion_residual", False)
+        and "final_action_mse" in metrics
+    ):
+        # Diffusion validation is evaluated in absolute-action space:
+        # MSE(expert_action, act_chunk + predicted_delta).
+        objective_loss = metrics["final_action_mse"]
 
     return objective_loss, metrics, pred_delta, target_delta
 

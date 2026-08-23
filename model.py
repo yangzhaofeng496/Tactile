@@ -828,15 +828,31 @@ class ResidualDiffusionDecoder(nn.Module):
             context.shape[0], self.horizon, self.action_dim,
             generator=generator, device="cpu", dtype=context.dtype,
         ).to(context.device)
+        alphas = 1.0 - self.betas
         for step in reversed(range(self.diffusion_steps)):
             timestep = torch.full(
                 (context.shape[0],), step, device=context.device, dtype=torch.long
             )
             predicted_noise = self.predict_noise(x, timestep, context)
-            alpha_bar = self.alphas_cumprod[step]
-            x0 = (x - (1.0 - alpha_bar).sqrt() * predicted_noise) / alpha_bar.sqrt()
+            alpha_t = alphas[step]
+            alpha_bar_t = self.alphas_cumprod[step]
+            alpha_bar_prev = (
+                self.alphas_cumprod[step - 1]
+                if step > 0
+                else x.new_tensor(1.0)
+            )
+            x0 = (
+                x - (1.0 - alpha_bar_t).sqrt() * predicted_noise
+            ) / alpha_bar_t.sqrt()
             if step > 0:
-                x = alpha_bar.sqrt() * x0 + (1.0 - alpha_bar).sqrt() * predicted_noise
+                posterior_mean = (
+                    alpha_bar_prev.sqrt() * self.betas[step]
+                    / (1.0 - alpha_bar_t) * x0
+                    + alpha_t.sqrt() * (1.0 - alpha_bar_prev)
+                    / (1.0 - alpha_bar_t) * x
+                )
+                # Deterministic validation: use posterior mean only.
+                x = posterior_mean
             else:
                 x = x0
         return x
