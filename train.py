@@ -247,6 +247,11 @@ def parse_args():
         help="Predict 6 delta magnitudes and 6 delta directions separately.",
     )
     parser.add_argument("--shared-factorized-delta", action="store_true")
+    parser.add_argument(
+        "--historical-force",
+        action="store_true",
+        help="Enable the historical force sequence in the multi-head fusion.",
+    )
     parser.add_argument("--action-calibrator-only", action="store_true")
     parser.add_argument("--freeze-action-calibrator", action="store_true")
     return parser.parse_args()
@@ -1469,6 +1474,11 @@ def main():
         decoder_cfg = model_config.setdefault("decoder", {})
         decoder_cfg["use_factorized_delta_decoder"] = True
         decoder_cfg["factorized_independent_axes"] = not args.shared_factorized_delta
+    if args.historical_force:
+        tactile_cfg = model_config.setdefault("tactile_encoder", {})
+        tactile_cfg["enabled"] = True
+        tactile_cfg["type"] = "force"
+        tactile_cfg.setdefault("force", {})["input_dim"] = 12
     if args.action_calibrator_only:
         decoder_cfg = model_config.setdefault("decoder", {})
         decoder_cfg["use_action_calibrator"] = True
