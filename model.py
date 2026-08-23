@@ -769,13 +769,16 @@ class ResidualDiffusionDecoder(nn.Module):
 
     def __init__(self, context_dim=80, action_dim=6, horizon=30,
                  model_dim=128, num_heads=4, num_layers=2,
-                 ffn_dim=256, diffusion_steps=20, dropout=0.1):
+                 ffn_dim=256, diffusion_steps=20, dropout=0.1,
+                 x0_loss_weight=0.1, validation_seed=1234):
         super().__init__()
         if model_dim % num_heads != 0:
             raise ValueError("diffusion model_dim must be divisible by num_heads")
         self.action_dim = int(action_dim)
         self.horizon = int(horizon)
         self.diffusion_steps = int(diffusion_steps)
+        self.x0_loss_weight = float(x0_loss_weight)
+        self.validation_seed = int(validation_seed)
         self.action_projection = nn.Linear(self.action_dim, model_dim)
         self.context_projection = nn.Linear(context_dim, model_dim)
         self.time_embedding = nn.Sequential(
@@ -811,16 +814,20 @@ class ResidualDiffusionDecoder(nn.Module):
         alpha_bar = self.alphas_cumprod[timestep].view(-1, 1, 1)
         noisy = alpha_bar.sqrt() * target + (1.0 - alpha_bar).sqrt() * noise
         predicted_noise = self.predict_noise(noisy, timestep, context)
-        loss = torch.nn.functional.mse_loss(predicted_noise, noise)
+        diffusion_loss = torch.nn.functional.mse_loss(predicted_noise, noise)
         x0 = (noisy - (1.0 - alpha_bar).sqrt() * predicted_noise) / alpha_bar.sqrt()
-        return x0, loss
+        x0_loss = torch.nn.functional.mse_loss(x0, target)
+        loss = diffusion_loss + self.x0_loss_weight * x0_loss
+        return x0, loss, diffusion_loss, x0_loss
 
     @torch.no_grad()
     def sample(self, context):
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(self.validation_seed)
         x = torch.randn(
             context.shape[0], self.horizon, self.action_dim,
-            device=context.device, dtype=context.dtype,
-        )
+            generator=generator, device="cpu", dtype=context.dtype,
+        ).to(context.device)
         for step in reversed(range(self.diffusion_steps)):
             timestep = torch.full(
                 (context.shape[0],), step, device=context.device, dtype=torch.long
@@ -1263,6 +1270,8 @@ class TactileResidualACT(nn.Module):
                 ffn_dim=int(decoder_cfg.get("diffusion_ffn_dim", 256)),
                 diffusion_steps=int(decoder_cfg.get("diffusion_steps", 20)),
                 dropout=float(decoder_cfg.get("dropout", 0.1)),
+                x0_loss_weight=float(decoder_cfg.get("diffusion_x0_loss_weight", 0.1)),
+                validation_seed=int(decoder_cfg.get("diffusion_validation_seed", 1234)),
             )
 
 
@@ -1512,11 +1521,13 @@ class TactileResidualACT(nn.Module):
         diffusion_loss = None
         if self.use_diffusion_residual:
             if self.training and diffusion_target is not None:
-                delta_action, diffusion_loss = self.diffusion_decoder.training_step(
+                delta_action, diffusion_loss, noise_loss, x0_loss = self.diffusion_decoder.training_step(
                     diffusion_target, z
                 )
             else:
                 delta_action = self.diffusion_decoder.sample(z)
+                noise_loss = None
+                x0_loss = None
         else:
             delta_action = self.decoder(z)
         if self.single_step_delta:
@@ -1558,6 +1569,8 @@ class TactileResidualACT(nn.Module):
                 feature_metrics = {}
             if diffusion_loss is not None:
                 feature_metrics["diffusion_loss"] = diffusion_loss
+                feature_metrics["diffusion_noise_loss"] = noise_loss
+                feature_metrics["diffusion_x0_loss"] = x0_loss
             contribution_list = []
             if c_t is not None:
                 contribution_list.append(c_t.norm(p=2, dim=-1))

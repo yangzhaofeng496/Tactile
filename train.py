@@ -969,6 +969,8 @@ def compute_losses(
     )
     if "diffusion_loss" in feature_metrics:
         metrics["diffusion_loss"] = feature_metrics["diffusion_loss"].detach()
+        metrics["diffusion_noise_loss"] = feature_metrics["diffusion_noise_loss"].detach()
+        metrics["diffusion_x0_loss"] = feature_metrics["diffusion_x0_loss"].detach()
         if model.training:
             objective_loss = feature_metrics["diffusion_loss"]
 
