@@ -114,6 +114,12 @@ decoder:
   use_temporal_decoder: false  # 可回溯开关：true时启用1层时间self-attention
   temporal_num_heads: 4
   temporal_ffn_dim: 128
+  # Residual Diffusion Transformer 可选参数（仅由 --residual-diffusion-transformer 启用）
+  diffusion_steps: 20
+  diffusion_model_dim: 128
+  diffusion_num_heads: 4
+  diffusion_num_layers: 2
+  diffusion_ffn_dim: 256
   output_dim: 180         # 30步 × 6轴delta
   action_horizon: 30
   action_dim: 6

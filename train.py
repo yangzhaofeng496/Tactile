@@ -76,6 +76,8 @@ def log_compact_wandb_metrics(step, metrics):
         payload["train/weight_loss"] = float(metrics["weighted_loss"])
     if "unweighted_loss" in metrics:
         payload["train/unweight_loss"] = float(metrics["unweighted_loss"])
+    if "diffusion_loss" in metrics:
+        payload["train/diffusion_loss"] = float(metrics["diffusion_loss"])
     if "head_gate_balance_loss" in metrics:
         payload["train/head_gate_balance_loss"] = float(
             metrics["head_gate_balance_loss"]
@@ -229,6 +231,11 @@ def parse_args():
         action="store_true",
         help="Use the token-based Residual Action Transformer fusion architecture.",
     )
+    parser.add_argument(
+        "--residual-diffusion-transformer",
+        action="store_true",
+        help="Use the optional Residual Diffusion Transformer decoder.",
+    )
     return parser.parse_args()
 
 
@@ -269,6 +276,7 @@ def init_metric_accumulator():
     return {
         "count": 0,
         "objective_loss_sum": 0.0,
+        "diffusion_loss_sum": 0.0,
         "weighted_loss_sum": 0.0,
         "unweighted_loss_sum": 0.0,
         "tactile_magnitude_mean_sum": 0.0,
@@ -935,17 +943,18 @@ def compute_losses(
     expert_action = batch["expert_action"]
     act_visual_tokens = batch.get("act_visual_tokens")
 
+    target_delta = compute_target_delta(
+        expert_action,
+        act_chunk,
+    )
     pred_delta, feature_metrics = model(
         tactile_history,
         current_force,
         state,
         act_chunk,
         act_visual_tokens=act_visual_tokens,
+        diffusion_target=target_delta,
         return_feature_metrics=True,
-    )
-    target_delta = compute_target_delta(
-        expert_action,
-        act_chunk,
     )
     if pred_delta.ndim == 2:
         target_delta = target_delta[:, 0, :]
@@ -958,6 +967,10 @@ def compute_losses(
         expert_action=expert_action,
         feature_metrics=feature_metrics,
     )
+    if "diffusion_loss" in feature_metrics:
+        metrics["diffusion_loss"] = feature_metrics["diffusion_loss"].detach()
+        if model.training:
+            objective_loss = feature_metrics["diffusion_loss"]
 
     return objective_loss, metrics, pred_delta, target_delta
 
@@ -1423,6 +1436,12 @@ def main():
     if args.residual_transformer:
         fusion_cfg = model_config.setdefault("fusion", {})
         fusion_cfg["type"] = "residual_transformer"
+        fusion_cfg["use_gate"] = False
+        fusion_cfg["use_modality_gate"] = False
+        fusion_cfg["use_timestep_modality_gate"] = False
+    if args.residual_diffusion_transformer:
+        fusion_cfg = model_config.setdefault("fusion", {})
+        fusion_cfg["type"] = "residual_diffusion_transformer"
         fusion_cfg["use_gate"] = False
         fusion_cfg["use_modality_gate"] = False
         fusion_cfg["use_timestep_modality_gate"] = False

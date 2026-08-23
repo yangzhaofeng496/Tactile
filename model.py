@@ -764,6 +764,77 @@ class ResidualActionTransformerFusion(nn.Module):
         return action_context
 
 
+class ResidualDiffusionDecoder(nn.Module):
+    """Conditional diffusion transformer for residual action chunks."""
+
+    def __init__(self, context_dim=80, action_dim=6, horizon=30,
+                 model_dim=128, num_heads=4, num_layers=2,
+                 ffn_dim=256, diffusion_steps=20, dropout=0.1):
+        super().__init__()
+        if model_dim % num_heads != 0:
+            raise ValueError("diffusion model_dim must be divisible by num_heads")
+        self.action_dim = int(action_dim)
+        self.horizon = int(horizon)
+        self.diffusion_steps = int(diffusion_steps)
+        self.action_projection = nn.Linear(self.action_dim, model_dim)
+        self.context_projection = nn.Linear(context_dim, model_dim)
+        self.time_embedding = nn.Sequential(
+            nn.Linear(1, model_dim), nn.GELU(), nn.Linear(model_dim, model_dim)
+        )
+        self.position = nn.Parameter(torch.zeros(1, self.horizon, model_dim))
+        layer = nn.TransformerEncoderLayer(
+            d_model=model_dim, nhead=int(num_heads),
+            dim_feedforward=int(ffn_dim), dropout=float(dropout),
+            activation="gelu", batch_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(layer, num_layers=int(num_layers))
+        self.output = nn.Sequential(
+            nn.LayerNorm(model_dim), nn.Linear(model_dim, self.action_dim)
+        )
+        betas = torch.linspace(1e-4, 0.02, self.diffusion_steps)
+        alphas = 1.0 - betas
+        self.register_buffer("betas", betas)
+        self.register_buffer("alphas_cumprod", torch.cumprod(alphas, dim=0))
+
+    def predict_noise(self, noisy_action, timestep, context):
+        t = timestep.to(context.dtype).view(-1, 1, 1) / max(self.diffusion_steps - 1, 1)
+        h = self.action_projection(noisy_action) + self.context_projection(context)
+        h = h + self.time_embedding(t).expand(-1, self.horizon, -1) + self.position
+        return self.output(self.transformer(h))
+
+    def training_step(self, target, context):
+        batch = target.shape[0]
+        timestep = torch.randint(
+            0, self.diffusion_steps, (batch,), device=target.device
+        )
+        noise = torch.randn_like(target)
+        alpha_bar = self.alphas_cumprod[timestep].view(-1, 1, 1)
+        noisy = alpha_bar.sqrt() * target + (1.0 - alpha_bar).sqrt() * noise
+        predicted_noise = self.predict_noise(noisy, timestep, context)
+        loss = torch.nn.functional.mse_loss(predicted_noise, noise)
+        x0 = (noisy - (1.0 - alpha_bar).sqrt() * predicted_noise) / alpha_bar.sqrt()
+        return x0, loss
+
+    @torch.no_grad()
+    def sample(self, context):
+        x = torch.randn(
+            context.shape[0], self.horizon, self.action_dim,
+            device=context.device, dtype=context.dtype,
+        )
+        for step in reversed(range(self.diffusion_steps)):
+            timestep = torch.full(
+                (context.shape[0],), step, device=context.device, dtype=torch.long
+            )
+            predicted_noise = self.predict_noise(x, timestep, context)
+            alpha_bar = self.alphas_cumprod[step]
+            x0 = (x - (1.0 - alpha_bar).sqrt() * predicted_noise) / alpha_bar.sqrt()
+            if step > 0:
+                x = alpha_bar.sqrt() * x0 + (1.0 - alpha_bar).sqrt() * predicted_noise
+            else:
+                x = x0
+        return x
+
+
 
 class TactileResidualACT(nn.Module):
 
@@ -1023,7 +1094,10 @@ class TactileResidualACT(nn.Module):
             )
         fusion_output_dim = int(fusion_cfg.get("output_dim", 256))
         fusion_type = fusion_cfg.get("type", "mlp")
-        self.fusion_returns_sequence = fusion_type == "residual_transformer"
+        self.fusion_returns_sequence = fusion_type in {
+            "residual_transformer", "residual_diffusion_transformer"
+        }
+        self.use_diffusion_residual = fusion_type == "residual_diffusion_transformer"
         fusion_cls = MultiHeadFusionEncoder if fusion_type == "multihead" else FusionEncoder
         fusion_kwargs = {
             "input_dim": fusion_input_dim,
@@ -1056,7 +1130,7 @@ class TactileResidualACT(nn.Module):
                     fusion_cfg.get("modality_gate_residual_scale", 1.0)
                 ),
             )
-        if fusion_type == "residual_transformer":
+        if fusion_type in {"residual_transformer", "residual_diffusion_transformer"}:
             transformer_modality_dims = []
             if tactile_output_dim:
                 transformer_modality_dims.append(tactile_output_dim)
@@ -1177,6 +1251,19 @@ class TactileResidualACT(nn.Module):
             temporal_ffn_dim=int(decoder_cfg.get("temporal_ffn_dim", 128)),
             dropout=float(decoder_cfg.get("dropout", 0.1)),
         )
+        self.diffusion_decoder = None
+        if self.use_diffusion_residual:
+            self.diffusion_decoder = ResidualDiffusionDecoder(
+                context_dim=decoder_input_dim,
+                action_dim=self.action_dim,
+                horizon=self.action_horizon,
+                model_dim=int(decoder_cfg.get("diffusion_model_dim", 128)),
+                num_heads=int(decoder_cfg.get("diffusion_num_heads", 4)),
+                num_layers=int(decoder_cfg.get("diffusion_num_layers", 2)),
+                ffn_dim=int(decoder_cfg.get("diffusion_ffn_dim", 256)),
+                diffusion_steps=int(decoder_cfg.get("diffusion_steps", 20)),
+                dropout=float(decoder_cfg.get("dropout", 0.1)),
+            )
 
 
     def forward(
@@ -1186,6 +1273,7 @@ class TactileResidualACT(nn.Module):
         state,
         act_chunk,
         act_visual_tokens=None,
+        diffusion_target=None,
         return_feature_metrics=False,
     ):
 
@@ -1421,7 +1509,16 @@ class TactileResidualACT(nn.Module):
             z = self.force_film(z, force_condition)
 
 
-        delta_action=self.decoder(z)
+        diffusion_loss = None
+        if self.use_diffusion_residual:
+            if self.training and diffusion_target is not None:
+                delta_action, diffusion_loss = self.diffusion_decoder.training_step(
+                    diffusion_target, z
+                )
+            else:
+                delta_action = self.diffusion_decoder.sample(z)
+        else:
+            delta_action = self.decoder(z)
         if self.single_step_delta:
             delta_action = delta_action[:, 0, :]
 
@@ -1459,6 +1556,8 @@ class TactileResidualACT(nn.Module):
                 feature_metrics = {}
             else:
                 feature_metrics = {}
+            if diffusion_loss is not None:
+                feature_metrics["diffusion_loss"] = diffusion_loss
             contribution_list = []
             if c_t is not None:
                 contribution_list.append(c_t.norm(p=2, dim=-1))
