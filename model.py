@@ -652,6 +652,8 @@ class FactorizedResidualDecoder(nn.Module):
         self.per_step = bool(per_step)
         self.independent_axes = bool(independent_axes)
         output_dim = 2 * (1 if self.per_step else self.action_horizon)
+        if not self.independent_axes:
+            output_dim *= self.action_dim
         decoder_count = self.action_dim if self.independent_axes else 1
         self.axis_decoders = nn.ModuleList()
         for _ in range(decoder_count):
@@ -662,29 +664,40 @@ class FactorizedResidualDecoder(nn.Module):
             )
             with torch.no_grad():
                 bias = decoder[-1].bias.view(
-                    1 if self.per_step else self.action_horizon, 2
+                    1 if self.per_step else self.action_horizon,
+                    2 * (1 if self.independent_axes else self.action_dim),
                 )
-                bias[:, 0].fill_(-2.0)
-                bias[:, 1].zero_()
+                if self.independent_axes:
+                    bias[:, 0].fill_(-2.0)
+                    bias[:, 1].zero_()
+                else:
+                    bias[:, :self.action_dim].fill_(-2.0)
+                    bias[:, self.action_dim:].zero_()
             self.axis_decoders.append(decoder)
 
     def forward(self, x):
         if self.per_step:
             if x.ndim != 3:
                 raise ValueError(f"factorized decoder expects [B, T, D], got {tuple(x.shape)}")
-            raw = torch.stack([decoder(x) for decoder in self.axis_decoders], dim=-1)
             if not self.independent_axes:
-                raw = raw.expand(*raw.shape[:-1], self.action_dim)
+                raw = self.axis_decoders[0](x)
+                magnitude, direction = raw.split(self.action_dim, dim=-1)
+                return torch.nn.functional.softplus(magnitude) * torch.tanh(direction)
+            raw = torch.stack([decoder(x) for decoder in self.axis_decoders], dim=-1)
             magnitude, direction = raw[..., 0, :], raw[..., 1, :]
             return torch.nn.functional.softplus(magnitude) * torch.tanh(direction)
         else:
             if x.ndim != 2:
                 raise ValueError(f"factorized decoder expects [B, D], got {tuple(x.shape)}")
-            raw = torch.stack([decoder(x) for decoder in self.axis_decoders], dim=-1)
             if not self.independent_axes:
-                raw = raw.expand(*raw.shape[:-1], self.action_dim)
-            raw = raw.reshape(x.shape[0], self.action_horizon, 2, self.action_dim)
-            magnitude, direction = raw[:, :, 0], raw[:, :, 1]
+                raw = self.axis_decoders[0](x).reshape(
+                    x.shape[0], self.action_horizon, 2, self.action_dim
+                )
+                magnitude, direction = raw[:, :, 0], raw[:, :, 1]
+            else:
+                raw = torch.stack([decoder(x) for decoder in self.axis_decoders], dim=-1)
+                raw = raw.reshape(x.shape[0], self.action_horizon, 2, self.action_dim)
+                magnitude, direction = raw[:, :, 0], raw[:, :, 1]
         return torch.nn.functional.softplus(magnitude) * torch.tanh(direction)
 
 
