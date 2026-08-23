@@ -1,0 +1,66 @@
+\documentclass[UTF8,a4paper]{ctexart}
+\usepackage[margin=2cm]{geometry}
+\usepackage{booktabs,longtable,array,graphicx,xcolor,hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}
+\title{Tactile Residual ACT 模型实验汇总与分析}
+\author{自动整理报告}
+\date{2026年8月23日}
+
+\begin{document}
+\maketitle
+
+\section{摘要}
+本文汇总当前 Residual ACT 系列的主要训练实验，重点比较动态 modality gate、multi-head gate、时间步 gate、时间建模 decoder、Residual Action Transformer 和 Residual Diffusion Transformer。表中数值来自本地训练日志中的 epoch 级记录；W\&B 运行名称和 checkpoint 路径与代码启动参数保持一致。
+
+需要特别说明：Diffusion Transformer 在本次整理时仅完成约 2 个 epoch，且其训练目标是噪声预测 MSE，验证目标是反向扩散生成动作后的 MSE。因此它的训练 loss 不能与普通模型的训练 loss 直接比较；当前较高的验证误差只能说明采样尚未稳定，不能作为最终架构结论。
+
+\section{实验总表}
+\begin{longtable}{p{3.2cm}p{4.2cm}r r r p{3.4cm}}
+\toprule
+实验 & 主要改动 & 已完成 epoch & 最佳 val loss & 最佳 epoch & 结论/状态\\
+\midrule
+\endhead
+Modality gate residual & 窗口级动态 modality gate，带 residual scale & 215 & 20.3246 & 75 & 有一定收益，但后期波动明显\\
+Multi-head 8 + balance/diversity & 8-head gate，加负载均衡与 head 多样性约束 & 153 & 19.8677 & 50 & 当前普通架构中最好\\
+Time-step action-conditioned gate & 时间步级 gate，并使用 action chunk 条件 & 102 & 20.3166 & 66 & 接近最佳，未明显超过 8-head\\
+Time-step modality gate & 每个时间步独立选择模态 & 22 & 20.7632 & 22 & 训练未充分，不宜下结论\\
+Time-step + temporal decoder & 时间步 gate 后加入 temporal Transformer decoder & 88 & 20.1567 & 28 & 有改善潜力，但后期泛化下降\\
+Residual Action Transformer & 模态 token 与 action token 联合 Transformer 融合 & 39 & 21.4333 & 31 & 当前弱于 gate 系列\\
+Residual Diffusion Transformer & Transformer context + diffusion action decoder & 2 & 93.0518 & 1 & 尚处早期，暂不能比较\\
+\bottomrule
+\end{longtable}
+
+\section{训练目标与可比性}
+普通模型直接预测动作残差，训练和验证均使用动作残差 MSE，因此其 val loss 可以横向比较。Diffusion 模型训练时首先给真实动作残差加噪，再预测噪声；当前训练目标为
+\[
+ L_{\mathrm{diff}}=L_{\mathrm{noise-MSE}}+0.1L_{x_0\mathrm{-MSE}}.
+\]
+验证阶段则从固定随机种子产生的高斯噪声开始进行反向扩散，最终对生成的动作残差计算 MSE。故 Diffusion 的 train/diffusion loss 与普通模型的 train loss 不同，应该只比较最终动作验证误差。
+
+\section{总体分析}
+\begin{enumerate}
+  \item 当前最可靠的基线是 8-head dynamic gate + balance/diversity constraint，日志最佳 val loss 为 19.8677。它比单纯 modality gate 的 20.3246 略好，说明 head 级路由带来的容量和分工有一定价值。
+  \item 时间步级 gate 的最佳结果约为 20.3166，与窗口级 gate 接近，说明不同时间步对模态的依赖可能存在，但目前收益小于训练和实现复杂度增加。
+  \item Temporal decoder 的最佳结果为 20.1567，略优于简单时间步 gate，但后期 val loss 回升，提示 decoder 容量、正则化或训练策略仍需调整。
+  \item Residual Action Transformer 在当前设置下为 21.4333，弱于成熟的 multi-head gate。可能原因是 token Transformer 的优化难度更高，且没有足够强的直接动作监督或更合适的参数规模。
+  \item Diffusion Transformer 当前结果不能判定失败。它只完成了极少量训练，并且反向采样误差会放大早期噪声预测误差。建议至少训练到与 baseline 相近的 epoch 后，再以固定采样种子比较动作 MSE。
+\end{enumerate}
+
+\section{建议的下一步}
+\begin{enumerate}
+  \item 先以 Multi-head 8 + gate balance/diversity 作为固定 baseline，统一 checkpoint、验证 batch 和随机种子。
+  \item Diffusion 实验至少训练 50--100 epoch，并同时记录 diffusion noise loss、$x_0$ reconstruction loss 和最终 action MSE。
+  \item 对 Diffusion 使用标准 DDPM posterior 或 DDIM 采样，并增加少量直接 $x_0$ loss 权重扫描，例如 0.05、0.1、0.25。
+  \item 时间建模方向优先保留 temporal decoder，在保持 gate 不变的前提下只扫描 decoder 深度、dropout 和 temporal loss，避免同时改变过多因素。
+\end{enumerate}
+
+\section{可追溯信息}
+\begin{itemize}
+  \item 训练日志目录：\texttt{logs/}
+  \item 主要 checkpoint 目录：\texttt{residual\_actmodel/experiments/}
+  \item Diffusion checkpoint：\texttt{residual\_actmodel/experiments/400\_50hil\_820\_residual\_diffusion\_transformer/}
+  \item W\&B 项目：\url{https://wandb.ai/2217047095-harbin-institute-of-technology/tactile-residual-act}
+  \item 代码回溯分支：\texttt{backup/pre-residual-transformer-20260823}
+\end{itemize}
+
+\end{document}
