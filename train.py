@@ -56,6 +56,17 @@ def log_compact_wandb_metrics(step, metrics):
 
     payload = {}
 
+    def metric_rows(value):
+        """Normalize scalar/list/tensor metrics for W&B iteration."""
+        if isinstance(value, torch.Tensor):
+            value = value.detach().cpu()
+            if value.ndim == 0:
+                return [value.item()]
+            return value.tolist()
+        if isinstance(value, (list, tuple)):
+            return value
+        return [value]
+
     # Objective loss
     if "objective_loss" in metrics:
         payload["train/objective_loss"] = float(metrics["objective_loss"])
@@ -65,16 +76,73 @@ def log_compact_wandb_metrics(step, metrics):
         payload["train/weight_loss"] = float(metrics["weighted_loss"])
     if "unweighted_loss" in metrics:
         payload["train/unweight_loss"] = float(metrics["unweighted_loss"])
+    if "head_gate_balance_loss" in metrics:
+        payload["train/head_gate_balance_loss"] = float(
+            metrics["head_gate_balance_loss"]
+        )
+    if "head_gate_diversity_loss" in metrics:
+        payload["train/head_gate_diversity_loss"] = float(
+            metrics["head_gate_diversity_loss"]
+        )
+    if "fusion_timestep_modality_gate_entropy" in metrics:
+        payload["fusion/timestep_modality_gate_entropy"] = float(
+            metrics["fusion_timestep_modality_gate_entropy"]
+        )
 
     if "fusion_head_weights" in metrics:
-        for i, value in enumerate(metrics["fusion_head_weights"]):
+        for i, value in enumerate(metric_rows(metrics["fusion_head_weights"])):
             payload[f"fusion/head_weight/head_{i}"] = float(value)
+    if "fusion_gate_weights" in metrics:
+        gate_weights = metrics["fusion_gate_weights"]
+        if isinstance(gate_weights, torch.Tensor):
+            gate_weights = gate_weights.detach().to(torch.float32)
+            if gate_weights.ndim > 1:
+                gate_weights = gate_weights.mean(dim=0)
+        for i, value in enumerate(metric_rows(gate_weights)):
+            payload[f"fusion/head_gate/head_{i}"] = float(value)
     if "fusion_modality_weights" in metrics:
-        names = ["current_force", "state", "action_chunk", "visual"]
         weights = metrics["fusion_modality_weights"]
+        if isinstance(weights, torch.Tensor) and weights.ndim == 2:
+            # Dynamic modality gate is [batch, num_modalities]; log the
+            # batch-average weights. Static legacy weights are [heads, 4].
+            if weights.shape[0] != 4 or weights.shape[1] != 4:
+                weights = weights.detach().to(torch.float32).mean(dim=0)
+        names = (
+            ["tactile", "current_force", "state", "action_chunk", "visual"]
+            if isinstance(weights, torch.Tensor) and weights.numel() == 5
+            else ["current_force", "state", "action_chunk", "visual"]
+        )
+        weights = metric_rows(weights)
+        if weights and not isinstance(weights[0], (list, tuple)):
+            weights = [weights]
         for head_idx, row in enumerate(weights):
             for name, value in zip(names, row):
                 payload[f"fusion/head_modality_weight/head_{head_idx}/{name}"] = float(value)
+    if "fusion_attention_weights" in metrics:
+        attention = metrics["fusion_attention_weights"]
+        if isinstance(attention, torch.Tensor):
+            attention = attention.detach().to(torch.float32).mean(dim=0)
+            names = ["current_force", "state", "action_chunk", "visual"]
+            for head_idx, matrix in enumerate(attention):
+                for query_idx, query_name in enumerate(names):
+                    for key_idx, key_name in enumerate(names):
+                        payload[
+                            f"fusion/self_attention/head_{head_idx}/{query_name}_to_{key_name}"
+                        ] = float(matrix[query_idx, key_idx])
+    if "fusion_pair_weights" in metrics:
+        pair_names = ["force_state", "force_action", "force_visual", "state_action", "state_visual", "action_visual"]
+        for pair_name, value in zip(pair_names, metric_rows(metrics["fusion_pair_weights"])):
+            payload[f"fusion/pair_weight/{pair_name}"] = float(value)
+    if "fusion_pair_attention_weights" in metrics:
+        attention = metrics["fusion_pair_attention_weights"]
+        if isinstance(attention, torch.Tensor):
+            attention = attention.detach().to(torch.float32).mean(dim=0)
+            pair_names = ["force_state", "force_action", "force_visual", "state_action", "state_visual", "action_visual"]
+            for pair_idx, pair_name in enumerate(pair_names):
+                for direction_idx, direction in enumerate(("left_to_right", "right_to_left")):
+                    matrix = attention[pair_idx, direction_idx]
+                    for head_idx in range(matrix.shape[0]):
+                        payload[f"fusion/pair_attention/{pair_name}/{direction}/head_{head_idx}"] = float(matrix[head_idx].mean())
     if "visual_encoder_rms" in metrics:
         payload["train/act_encoder_latent_rms"] = float(metrics["visual_encoder_rms"])
 
@@ -140,6 +208,22 @@ def parse_args():
         default=None,
         help="Override training.checkpoint_dir for parallel experiments.",
     )
+    parser.add_argument(
+        "--wandb-name",
+        type=str,
+        default=None,
+        help="Override the W&B run name for this experiment.",
+    )
+    parser.add_argument(
+        "--timestep-modality-gate",
+        action="store_true",
+        help="Enable timestep modality gate and disable the window-level modality gate.",
+    )
+    parser.add_argument(
+        "--temporal-decoder",
+        action="store_true",
+        help="Enable the optional one-layer temporal Transformer decoder.",
+    )
     return parser.parse_args()
 
 
@@ -198,6 +282,9 @@ def init_metric_accumulator():
         "low_magnitude_mse_sum": 0.0,
         "final_action_mse_sum": 0.0,
         "grad_norm_sum": 0.0,
+        "head_gate_balance_loss_sum": 0.0,
+        "head_gate_diversity_loss_sum": 0.0,
+        "fusion_timestep_modality_gate_entropy_sum": 0.0,
         "pred_delta_abs_mean_sum": 0.0,
         "pred_delta_abs_max_sum": 0.0,
         "pred_delta_std_sum": 0.0,
@@ -498,7 +585,11 @@ def add_relative_gaussian_noise(values, relative_std=0.0):
     relative_std = float(relative_std)
     if relative_std <= 0.0:
         return values
-    scale = values.detach().to(torch.float32).std(dim=0, keepdim=True)
+    # Use the population standard deviation so a one-sample final batch
+    # produces zero instead of NaN (torch.std defaults to unbiased=True).
+    scale = values.detach().to(torch.float32).std(
+        dim=0, keepdim=True, unbiased=False
+    )
     scale = scale.clamp_min(1e-6).to(dtype=values.dtype, device=values.device)
     return values + torch.randn_like(values) * scale * relative_std
 
@@ -866,6 +957,43 @@ def compute_losses(
     return objective_loss, metrics, pred_delta, target_delta
 
 
+def compute_head_router_losses(feature_metrics):
+    """Compute auxiliary routing losses for multi-head fusion.
+
+    The balance term acts on the batch-average routing probability, so it
+    prevents head collapse without forcing every sample to use all heads.
+    The diversity term discourages different heads from producing identical
+    representations.
+    """
+    gate_weights = feature_metrics.get("fusion_gate_weights")
+    head_outputs = feature_metrics.get("fusion_head_outputs")
+    if not isinstance(gate_weights, torch.Tensor) or not isinstance(
+        head_outputs, torch.Tensor
+    ):
+        zero = next(
+            value for value in feature_metrics.values()
+            if isinstance(value, torch.Tensor) and value.ndim == 0
+        ) if any(
+            isinstance(value, torch.Tensor) and value.ndim == 0
+            for value in feature_metrics.values()
+        ) else torch.tensor(0.0)
+        return zero, zero
+
+    mean_gate = gate_weights.to(torch.float32).mean(dim=0)
+    num_heads = mean_gate.numel()
+    balance_loss = num_heads * mean_gate.square().sum()
+
+    normalized = torch.nn.functional.normalize(
+        head_outputs.to(torch.float32), dim=-1, eps=1e-6
+    )
+    similarity = torch.matmul(normalized, normalized.transpose(-1, -2))
+    off_diagonal = ~torch.eye(
+        num_heads, dtype=torch.bool, device=similarity.device
+    )
+    diversity_loss = similarity[..., off_diagonal].square().mean()
+    return balance_loss, diversity_loss
+
+
 def temporal_smoothness_loss(pred_action):
     """Second-order smoothness penalty for predicted action chunks."""
     if pred_action.shape[1] < 3:
@@ -921,6 +1049,8 @@ def train_one_epoch(
     state_noise_std=0.0,
     temporal_smoothness_weight=0.0,
     action_chunk_consistency_weight=0.0,
+    head_gate_balance_weight=0.0,
+    head_gate_diversity_weight=0.0,
     modality_dropout_prob=0.0,
     ablate_modalities=None,
 ):
@@ -985,6 +1115,19 @@ def train_one_epoch(
                     criterion=criterion,
                     batch=batch,
                 )
+                if (
+                    head_gate_balance_weight > 0.0
+                    or head_gate_diversity_weight > 0.0
+                ):
+                    balance_loss, diversity_loss = compute_head_router_losses(
+                        metrics
+                    )
+                    objective_loss = objective_loss + (
+                        head_gate_balance_weight * balance_loss
+                        + head_gate_diversity_weight * diversity_loss
+                    )
+                    metrics["head_gate_balance_loss"] = balance_loss.detach()
+                    metrics["head_gate_diversity_loss"] = diversity_loss.detach()
                 if temporal_smoothness_weight > 0.0:
                     predicted_action = batch["act_chunk"] + pred_delta
                     objective_loss = objective_loss + (
@@ -1264,6 +1407,14 @@ def main():
         training_cfg["ablate_modalities"] = list(args.ablate_modalities)
     if args.checkpoint_dir is not None:
         training_cfg["checkpoint_dir"] = str(args.checkpoint_dir)
+    if args.wandb_name is not None:
+        training_cfg["wandb_name"] = str(args.wandb_name)
+    if args.timestep_modality_gate:
+        fusion_cfg = model_config.setdefault("fusion", {})
+        fusion_cfg["use_modality_gate"] = False
+        fusion_cfg["use_timestep_modality_gate"] = True
+    if args.temporal_decoder:
+        model_config.setdefault("decoder", {})["use_temporal_decoder"] = True
 
     set_seed(int(dataloader_config["split"]["seed"]))
     device = resolve_device(training_cfg)
@@ -1353,7 +1504,10 @@ def main():
     try:
         wandb.init(
             project="tactile-residual-act",
-            name=f"train_{dataloader_config['split']['seed']}_{model_config['tactile_encoder']['type']}",
+            name=training_cfg.get(
+                "wandb_name",
+                f"train_{dataloader_config['split']['seed']}_{model_config['tactile_encoder']['type']}",
+            ),
             config={
                 "epochs": int(training_cfg["num_epochs"]),
                 "batch_size": dataloader_config["loader"]["batch_size"],
@@ -1378,6 +1532,13 @@ def main():
                     criterion.tactile_input_already_normalized
                 ),
                 "tactile_stats_path": criterion_metadata["tactile_stats_path"],
+                "experiment_name": training_cfg.get("wandb_name", "default"),
+                "head_gate_balance_weight": float(
+                    training_cfg.get("head_gate_balance_weight", 0.0)
+                ),
+                "head_gate_diversity_weight": float(
+                    training_cfg.get("head_gate_diversity_weight", 0.0)
+                ),
             },
         )
     except Exception as exc:
@@ -1584,6 +1745,12 @@ def main():
     action_chunk_consistency_weight = float(
         training_cfg.get("action_chunk_consistency_weight", 0.0)
     )
+    head_gate_balance_weight = float(
+        training_cfg.get("head_gate_balance_weight", 0.0)
+    )
+    head_gate_diversity_weight = float(
+        training_cfg.get("head_gate_diversity_weight", 0.0)
+    )
     modality_dropout_prob = float(
         training_cfg.get("modality_dropout_prob", 0.0)
     )
@@ -1642,6 +1809,8 @@ def main():
             state_noise_std=state_noise_std,
             temporal_smoothness_weight=temporal_smoothness_weight,
             action_chunk_consistency_weight=action_chunk_consistency_weight,
+            head_gate_balance_weight=head_gate_balance_weight,
+            head_gate_diversity_weight=head_gate_diversity_weight,
             modality_dropout_prob=modality_dropout_prob,
             ablate_modalities=ablate_modalities,
         )

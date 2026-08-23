@@ -6,8 +6,15 @@
     - act_visual: mean-pooled视觉特征 [D]（来自ACT transformer encoder的视觉token）
 按 absolute_index 缓存到磁盘。之后训练时不再需要实时跑ACT。
 
+配合 use_cache_loader=true 时还会把训练所需输入一并缓存:
+    - tactile_history: [T, D]
+    - current_force: [D]
+    - state: [D]
+    - expert_action: [K, D]
+使得训练完全脱离LeRobotDataset（不解码任何视频）。
+
 用法:
-    python dataloader/preprocess_act_cache.py --config dataloader/tactile_dataloader.yaml \
+    python -m dataloader.preprocess_act_cache --config dataloader/tactile_dataloader.yaml \
         --output outputs/act_cache/act_cache.pt
 """
 
@@ -21,6 +28,7 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from dataloader.dataloader import (
+    DatasetKeys,
     build_base_dataset,
     extract_action_tensor,
     get_episode_bounds,
@@ -56,7 +64,9 @@ def compute_valid_indices(
     sequence_cfg = config["sequence"]
     tactile_type = keys["tactile_type"]
 
-    if tactile_type == "image":
+    if tactile_type is None:
+        tactile_history = 1
+    elif tactile_type == "image":
         tactile_history = int(sequence_cfg["tactile_history_image"])
     else:
         tactile_history = int(sequence_cfg["tactile_history_force"])
@@ -64,6 +74,33 @@ def compute_valid_indices(
     action_horizon = int(sequence_cfg.get("action_horizon", 0))
 
     episode_bounds = get_episode_bounds(dataset)
+
+    # Some converted datasets retain stale meta/episodes parquet files.  In
+    # that case their dataset_to_index values can exceed the actual Arrow
+    # table length.  Rebuild contiguous episode bounds from the rows that are
+    # really present in the loaded dataset.
+    if episode_bounds and max(end for _, end in episode_bounds.values()) > len(dataset):
+        if not hasattr(dataset, "hf_dataset"):
+            raise RuntimeError(
+                "Episode metadata exceeds the loaded dataset length, and the "
+                "dataset does not expose hf_dataset for rebuilding bounds."
+            )
+        episode_values = dataset.hf_dataset["episode_index"]
+        episode_bounds = {}
+        if episode_values:
+            start = 0
+            current = int(episode_values[0])
+            for row, value in enumerate(episode_values[1:], start=1):
+                value = int(value)
+                if value != current:
+                    episode_bounds[current] = (start, row)
+                    start = row
+                    current = value
+            episode_bounds[current] = (start, len(episode_values))
+        print(
+            "检测到过期episode元数据，已按实际数据重建边界："
+            f"{len(episode_bounds)}个episode，{len(dataset)}帧"
+        )
 
     valid_indices = []
     for episode_id in sorted(episode_bounds.keys()):
@@ -96,12 +133,12 @@ def parse_args():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=8,
+        default=4,
     )
     parser.add_argument(
         "--num-workers",
         type=int,
-        default=4,
+        default=0,
     )
     parser.add_argument(
         "--limit",
@@ -109,7 +146,70 @@ def parse_args():
         default=0,
         help="仅处理前N个窗口（0=全部）。用于快速测试。",
     )
+    parser.add_argument(
+        "--full-cache",
+        action="store_true",
+        help="额外缓存训练输入(tactile_history/current_force/state/expert_action)，"
+             "配合use_cache_loader=true使用，训练完全脱离数据集。",
+    )
     return parser.parse_args()
+
+
+def _extract_inputs(cpu_batch, keys, action_horizon):
+    """从CPU batch提取训练输入，与TactileACTDataset.__getitem__逻辑一致。"""
+    def _get(key):
+        return cpu_batch["input:" + key]
+
+    # 触觉历史（光学-only cache 不包含该字段）
+    if keys.tactile_type is None:
+        tactile_history = None
+    elif isinstance(keys.tactile, str):
+        tactile_history = _get(keys.tactile).float()
+    else:
+        tactile_tensors = [
+            _get(key).float()
+            for key in keys.tactile
+        ]
+        # 触觉历史 [B, T, D]，在D维拼接
+        tactile_history = torch.cat(tactile_tensors, dim=-1)
+
+    # 当前力
+    if keys.current_force is not None:
+        if isinstance(keys.current_force, str):
+            current_force = _get(keys.current_force).float()
+        else:
+            current_force_tensors = [
+                _get(key).float()
+                for key in keys.current_force
+            ]
+            current_force = torch.cat(current_force_tensors, dim=-1)
+        if current_force.ndim > 2:
+            current_force = current_force[..., -1, :]
+        elif current_force.ndim > 1 and current_force.shape[1] > 1:
+            current_force = current_force[:, -1]
+    else:
+        current_force = None
+
+    # 状态
+    state = _get(keys.state).float() if keys.state is not None else None
+
+    # 专家动作
+    expert_action = (
+        _get(keys.expert_action)[:, :action_horizon].float()
+        if keys.expert_action is not None
+        else None
+    )
+
+    outputs = {}
+    if tactile_history is not None:
+        outputs["tactile_history"] = tactile_history
+    if current_force is not None:
+        outputs["current_force"] = current_force
+    if state is not None:
+        outputs["state"] = state
+    if expert_action is not None:
+        outputs["expert_action"] = expert_action
+    return outputs
 
 
 def main():
@@ -140,6 +240,28 @@ def main():
         valid_indices = valid_indices[:args.limit]
         print(f"（限制模式）只处理前{args.limit}个窗口")
 
+    keys = DatasetKeys(**config["dataset"]["keys"])
+    cache_inputs = bool(args.full_cache)
+
+    # 训练输入所需的原始键（用于collate堆叠）
+    _input_keys = []
+    if cache_inputs:
+        if keys.tactile_type is not None:
+            if isinstance(keys.tactile, str):
+                _input_keys.append(keys.tactile)
+            else:
+                _input_keys.extend(keys.tactile)
+        if keys.current_force is not None:
+            if isinstance(keys.current_force, str):
+                _input_keys.append(keys.current_force)
+            else:
+                _input_keys.extend(keys.current_force)
+        if keys.state is not None:
+            _input_keys.append(keys.state)
+        if keys.expert_action is not None:
+            _input_keys.append(keys.expert_action)
+    _input_keys = list(dict.fromkeys(_input_keys))  # 去重保持顺序
+
     print("加载冻结ACT策略……")
     policy, preprocessor, postprocessor, device = load_lerobot_policy(
         config,
@@ -168,11 +290,16 @@ def main():
     def collate_fn(batch):
         indices = [item[0] for item in batch]
         samples = [item[1] for item in batch]
-        # 只堆叠ACT观测所需字段
         collated = {}
+        # 堆叠ACT观测所需字段
         for key in act_observation_keys:
             tensors = [s[key] for s in samples]
             collated[key] = torch.stack(tensors, dim=0)
+        # 堆叠训练输入所需字段
+        if cache_inputs:
+            for key in _input_keys:
+                tensors = [s[key] for s in samples]
+                collated["input:" + key] = torch.stack(tensors, dim=0)
         return indices, collated
 
     loader = DataLoader(
@@ -226,10 +353,18 @@ def main():
                     raise RuntimeError("ACT encoder输出中没有视觉token。")
                 visual = visual_tokens.mean(dim=1).float().cpu()  # [B, D]
 
+            # 预处理训练输入（若开启full_cache）
+            inputs_batch = None
+            if cache_inputs:
+                inputs_batch = _extract_inputs(cpu_batch, keys, action_horizon)
+
             for i, idx in enumerate(indices):
                 entry = {"act_chunk": act_chunk[i]}
                 if visual is not None:
                     entry["act_visual"] = visual[i]
+                if inputs_batch is not None:
+                    for k, v in inputs_batch.items():
+                        entry[k] = v[i]
                 cache[int(idx)] = entry
     finally:
         if use_act_visual:

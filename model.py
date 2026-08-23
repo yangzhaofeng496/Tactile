@@ -316,11 +316,42 @@ class FusionEncoder(nn.Module):
 class MultiHeadFusionEncoder(nn.Module):
     """Single-layer normalized multi-head modality fusion."""
 
-    def __init__(self, input_dim, hidden_dim, output_dim, num_heads=4, dropout=0.1):
+    def __init__(
+        self,
+        input_dim,
+        hidden_dim,
+        output_dim,
+        num_heads=4,
+        dropout=0.1,
+        use_gate=True,
+        modality_dims=None,
+        use_modality_gate=False,
+        modality_gate_temperature=1.0,
+        modality_gate_residual_scale=1.0,
+    ):
         super().__init__()
         if hidden_dim % num_heads != 0:
             raise ValueError("fusion hidden_dim must be divisible by num_heads")
         self.num_heads = int(num_heads)
+        self.use_gate = bool(use_gate)
+        self.modality_dims = tuple(int(dim) for dim in (modality_dims or ()))
+        self.use_modality_gate = bool(use_modality_gate)
+        self.modality_gate_temperature = float(modality_gate_temperature)
+        self.modality_gate_residual_scale = float(modality_gate_residual_scale)
+        if self.modality_gate_temperature <= 0:
+            raise ValueError("modality_gate_temperature must be positive")
+        if self.modality_gate_residual_scale < 0:
+            raise ValueError("modality_gate_residual_scale must be non-negative")
+        if self.use_modality_gate:
+            if not self.modality_dims or sum(self.modality_dims) != int(input_dim):
+                raise ValueError(
+                    "dynamic modality gate requires modality_dims to sum to fusion input_dim"
+                )
+            self.modality_gate = nn.Sequential(
+                nn.Linear(input_dim, 32),
+                nn.GELU(),
+                nn.Linear(32, len(self.modality_dims)),
+            )
         self.heads = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(input_dim, hidden_dim),
@@ -330,6 +361,12 @@ class MultiHeadFusionEncoder(nn.Module):
             ) for _ in range(self.num_heads)
         ])
         self.head_weights = nn.Parameter(torch.zeros(self.num_heads))
+        gate_hidden_dim = 32
+        self.head_gate = nn.Sequential(
+            nn.Linear(input_dim, gate_hidden_dim),
+            nn.GELU(),
+            nn.Linear(gate_hidden_dim, self.num_heads),
+        )
         self.modality_weights = nn.Parameter(torch.zeros(self.num_heads, 4))
         self.merge_norm = nn.LayerNorm(hidden_dim)
         self.skip = nn.Linear(input_dim, hidden_dim)
@@ -343,19 +380,149 @@ class MultiHeadFusionEncoder(nn.Module):
         self.output_skip = nn.Linear(hidden_dim, output_dim)
 
     def forward(self, x, return_attention=False):
+        modality_weights = torch.softmax(self.modality_weights, dim=-1)
+        if self.use_modality_gate:
+            dynamic_modality_weights = torch.softmax(
+                self.modality_gate(x) / self.modality_gate_temperature,
+                dim=-1,
+            )
+            # Residual gating preserves the original feature when weights are
+            # uniform and prevents a modality from being fully suppressed.
+            normalized_weight = (
+                len(self.modality_dims) * dynamic_modality_weights
+            )
+            feature_scale = 1.0 + self.modality_gate_residual_scale * (
+                normalized_weight - 1.0
+            )
+            chunks = torch.split(x, self.modality_dims, dim=-1)
+            x = torch.cat(
+                [chunk * feature_scale[:, index:index + 1]
+                 for index, chunk in enumerate(chunks)],
+                dim=-1,
+            )
+            modality_weights = dynamic_modality_weights
         heads = torch.stack([head(x) for head in self.heads], dim=1)
-        weights = torch.softmax(self.head_weights, dim=0).view(1, self.num_heads, 1)
+        static_weights = torch.softmax(self.head_weights, dim=0)
+        if self.use_gate:
+            gate_weights = torch.softmax(
+                self.head_gate(x) + self.head_weights.view(1, self.num_heads),
+                dim=-1,
+            )
+        else:
+            gate_weights = static_weights.expand(x.shape[0], -1)
+        weights = gate_weights.unsqueeze(-1)
         merged = self.merge_norm((heads * weights).sum(dim=1))
         residual = self.skip(x)
         fused = self.merge_norm(merged + residual)
         output = self.output_norm(self.ffn(fused) + self.output_skip(fused))
         if return_attention:
             return output, {
-                "head_weights": torch.softmax(self.head_weights, dim=0),
-                "modality_weights": torch.softmax(self.modality_weights, dim=-1),
+                "head_weights": static_weights,
+                "gate_weights": gate_weights,
+                "modality_weights": modality_weights,
+                "head_outputs": heads,
             }
         return output
 
+
+
+class ModalitySelfAttentionFusionEncoder(nn.Module):
+    """One Transformer-style self-attention block over modality tokens."""
+
+    def __init__(self, modality_dims, embed_dim, output_dim, num_heads=4, ffn_dim=192, dropout=0.1):
+        super().__init__()
+        if embed_dim % num_heads != 0:
+            raise ValueError("fusion embed_dim must be divisible by num_heads")
+        self.num_heads = int(num_heads)
+        self.projections = nn.ModuleList([
+            nn.Sequential(nn.Linear(dim, embed_dim), nn.LayerNorm(embed_dim))
+            for dim in modality_dims
+        ])
+        self.modality_embeddings = nn.Parameter(torch.zeros(1, len(modality_dims), embed_dim))
+        self.attention = nn.MultiheadAttention(
+            embed_dim=embed_dim, num_heads=num_heads, dropout=dropout, batch_first=True
+        )
+        self.attn_norm = nn.LayerNorm(embed_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(embed_dim, ffn_dim), nn.GELU(), nn.Dropout(dropout),
+            nn.Linear(ffn_dim, embed_dim), nn.Dropout(dropout)
+        )
+        self.ffn_norm = nn.LayerNorm(embed_dim)
+        self.output = nn.Sequential(nn.Linear(embed_dim, output_dim), nn.LayerNorm(output_dim))
+
+    def forward(self, modality_features, return_attention=False):
+        tokens = torch.stack(
+            [projection(feature) for projection, feature in zip(self.projections, modality_features)], dim=1
+        ) + self.modality_embeddings
+        attended, weights = self.attention(
+            tokens, tokens, tokens, need_weights=return_attention, average_attn_weights=False
+        )
+        tokens = self.attn_norm(tokens + attended)
+        tokens = self.ffn_norm(tokens + self.ffn(tokens))
+        output = self.output(tokens.mean(dim=1))
+        if return_attention:
+            return output, {"attention_weights": weights}
+        return output
+
+
+class PairwiseCrossAttentionFusionEncoder(nn.Module):
+    """Bidirectional pairwise cross-attention over learned modality tokens."""
+
+    def __init__(self, modality_dims, embed_dim, output_dim, num_heads=4, num_tokens=4, ffn_dim=192, dropout=0.1):
+        super().__init__()
+        if embed_dim % num_heads != 0:
+            raise ValueError("fusion embed_dim must be divisible by num_heads")
+        self.num_heads = int(num_heads)
+        self.num_tokens = int(num_tokens)
+        self.projections = nn.ModuleList([
+            nn.Sequential(nn.Linear(dim, num_tokens * embed_dim), nn.LayerNorm(num_tokens * embed_dim))
+            for dim in modality_dims
+        ])
+        self.attention = nn.MultiheadAttention(
+            embed_dim=embed_dim, num_heads=num_heads, dropout=dropout, batch_first=True
+        )
+        self.pairs = [(i, j) for i in range(4) for j in range(i + 1, 4)]
+        self.pair_weights = nn.Parameter(torch.zeros(len(self.pairs)))
+        self.merge_norm = nn.LayerNorm(embed_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(embed_dim, ffn_dim), nn.GELU(), nn.Dropout(dropout),
+            nn.Linear(ffn_dim, embed_dim), nn.Dropout(dropout)
+        )
+        self.ffn_norm = nn.LayerNorm(embed_dim)
+        self.output = nn.Sequential(nn.Linear(embed_dim, output_dim), nn.LayerNorm(output_dim))
+
+    def forward(self, modality_features, return_attention=False):
+        tokens = [
+            projection(feature).view(feature.shape[0], self.num_tokens, -1)
+            for projection, feature in zip(self.projections, modality_features)
+        ]
+        pair_outputs = []
+        pair_attention = []
+        for left, right in self.pairs:
+            left_out, left_weights = self.attention(
+                tokens[left], tokens[right], tokens[right],
+                need_weights=return_attention, average_attn_weights=False,
+            )
+            right_out, right_weights = self.attention(
+                tokens[right], tokens[left], tokens[left],
+                need_weights=return_attention, average_attn_weights=False,
+            )
+            pair_outputs.append((left_out.mean(dim=1) + right_out.mean(dim=1)) / 2.0)
+            if return_attention:
+                pair_attention.append(torch.stack([left_weights, right_weights], dim=1))
+        pair_outputs = torch.stack(pair_outputs, dim=1)
+        pair_weights = torch.softmax(self.pair_weights, dim=0).view(1, len(self.pairs), 1)
+        fused = self.merge_norm((pair_outputs * pair_weights).sum(dim=1))
+        residual = torch.stack(tokens, dim=1).mean(dim=(1, 2))
+        fused = self.merge_norm(fused + residual)
+        fused = self.ffn_norm(fused + self.ffn(fused))
+        output = self.output(fused)
+        if return_attention:
+            return output, {
+                "pair_attention_weights": torch.stack(pair_attention, dim=1),
+                "pair_weights": torch.softmax(self.pair_weights, dim=0),
+            }
+        return output
 
 
 class VisualTokenEncoder(nn.Module):
@@ -408,11 +575,34 @@ class ResidualDecoder(nn.Module):
         hidden_dim=256,
         action_horizon=30,
         action_dim=6,
+        per_step=False,
+        temporal=False,
+        temporal_num_heads=4,
+        temporal_ffn_dim=128,
+        dropout=0.1,
     ):
 
         super().__init__()
         self.action_horizon = int(action_horizon)
         self.action_dim = int(action_dim)
+        self.per_step = bool(per_step)
+        self.temporal = bool(temporal)
+        if self.temporal:
+            if input_dim % int(temporal_num_heads) != 0:
+                raise ValueError("decoder input_dim must be divisible by temporal_num_heads")
+            self.temporal_pos = nn.Parameter(
+                torch.zeros(1, self.action_horizon, int(input_dim))
+            )
+            layer = nn.TransformerEncoderLayer(
+                d_model=int(input_dim),
+                nhead=int(temporal_num_heads),
+                dim_feedforward=int(temporal_ffn_dim),
+                dropout=float(dropout),
+                activation="gelu",
+                batch_first=True,
+                norm_first=False,
+            )
+            self.temporal_encoder = nn.TransformerEncoder(layer, num_layers=1)
 
         self.decoder=nn.Sequential(
 
@@ -421,23 +611,97 @@ class ResidualDecoder(nn.Module):
 
             nn.Linear(
                 hidden_dim,
-                self.action_horizon * self.action_dim
+                self.action_dim
+                if self.per_step or self.temporal
+                else self.action_horizon * self.action_dim,
             )
 
         )
 
 
     def forward(self,x):
-
+        if self.temporal:
+            if x.ndim == 2:
+                x = x.unsqueeze(1).expand(-1, self.action_horizon, -1)
+            if x.ndim != 3 or x.shape[1] != self.action_horizon:
+                raise ValueError(
+                    f"temporal decoder expects [B, {self.action_horizon}, D], got {tuple(x.shape)}"
+                )
+            x = self.temporal_encoder(x + self.temporal_pos)
+            x = self.decoder(x)
+            return x
+        if self.per_step:
+            if x.ndim != 3:
+                raise ValueError(
+                    f"per-step decoder expects [B, T, D], got {tuple(x.shape)}"
+                )
+            return self.decoder(x)
         B=x.shape[0]
-
         x=self.decoder(x)
+        return x.reshape(B, self.action_horizon, self.action_dim)
 
-        return x.reshape(
-            B,
-            self.action_horizon,
-            self.action_dim,
+
+class TimestepModalityGate(nn.Module):
+    """Generate a modality mixture separately for every action step."""
+
+    def __init__(
+        self,
+        modality_dims,
+        context_dim,
+        output_dim,
+        action_horizon,
+        action_dim=6,
+        hidden_dim=32,
+        step_embedding_dim=16,
+        temperature=1.5,
+        residual_scale=0.5,
+    ):
+        super().__init__()
+        self.modality_dims = tuple(int(dim) for dim in modality_dims)
+        self.num_modalities = len(self.modality_dims)
+        self.action_horizon = int(action_horizon)
+        self.action_dim = int(action_dim)
+        self.temperature = float(temperature)
+        self.residual_scale = float(residual_scale)
+        if self.temperature <= 0 or self.residual_scale < 0:
+            raise ValueError("Invalid timestep modality gate temperature/scale")
+        self.projections = nn.ModuleList([
+            nn.Sequential(nn.Linear(dim, output_dim), nn.LayerNorm(output_dim))
+            for dim in self.modality_dims
+        ])
+        self.step_embeddings = nn.Parameter(
+            torch.zeros(1, self.action_horizon, step_embedding_dim)
         )
+        self.action_condition = nn.Sequential(
+            nn.Linear(self.action_dim, step_embedding_dim),
+            nn.GELU(),
+        )
+        self.router = nn.Sequential(
+            nn.Linear(context_dim + 2 * step_embedding_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, self.num_modalities),
+        )
+
+    def forward(self, context, modality_features, action_chunk=None):
+        if len(modality_features) != self.num_modalities:
+            raise ValueError("Timestep modality feature count does not match gate")
+        if action_chunk is None or action_chunk.ndim != 3:
+            raise ValueError("Action-conditioned timestep gate requires [B, T, action_dim]")
+        if action_chunk.shape[1] != self.action_horizon or action_chunk.shape[2] != self.action_dim:
+            raise ValueError("Action chunk shape does not match timestep gate configuration")
+        projected = torch.stack(
+            [projection(feature) for projection, feature in zip(self.projections, modality_features)],
+            dim=1,
+        )
+        router_input = torch.cat([
+            context.unsqueeze(1).expand(-1, self.action_horizon, -1),
+            self.step_embeddings.expand(context.shape[0], -1, -1),
+            self.action_condition(action_chunk),
+        ], dim=-1)
+        weights = torch.softmax(self.router(router_input) / self.temperature, dim=-1)
+        fused = (weights.unsqueeze(-1) * projected.unsqueeze(1)).sum(dim=2)
+        gated_context = context.unsqueeze(1) + self.residual_scale * fused
+        return gated_context, weights
 
 
 
@@ -488,6 +752,14 @@ class TactileResidualACT(nn.Module):
         current_force_encoder_cfg = current_force_encoder_cfg or {}
         force_film_cfg = force_film_cfg or {}
         visual_encoder_cfg = visual_encoder_cfg or {}
+
+        if bool(fusion_cfg.get("use_modality_gate", False)) and bool(
+            fusion_cfg.get("use_timestep_modality_gate", False)
+        ):
+            raise ValueError(
+                "use_modality_gate and use_timestep_modality_gate are mutually exclusive "
+                "for a clean ablation."
+            )
 
         # 是否启用ACT视觉token输入
         self.use_act_visual = bool(use_act_visual)
@@ -698,11 +970,56 @@ class TactileResidualACT(nn.Module):
             "output_dim": fusion_output_dim,
         }
         if fusion_cls is MultiHeadFusionEncoder:
+            modality_dims = []
+            if tactile_output_dim:
+                modality_dims.append(tactile_output_dim)
+            modality_dims += [
+                current_force_output_dim,
+                state_output_dim,
+                action_output_dim,
+            ]
+            if visual_output_dim:
+                modality_dims.append(visual_output_dim)
             fusion_kwargs.update(
                 num_heads=int(fusion_cfg.get("num_heads", 4)),
                 dropout=float(fusion_cfg.get("dropout", 0.1)),
+                use_gate=bool(fusion_cfg.get("use_gate", True)),
+                modality_dims=modality_dims,
+                use_modality_gate=bool(
+                    fusion_cfg.get("use_modality_gate", False)
+                ),
+                modality_gate_temperature=float(
+                    fusion_cfg.get("modality_gate_temperature", 1.0)
+                ),
+                modality_gate_residual_scale=float(
+                    fusion_cfg.get("modality_gate_residual_scale", 1.0)
+                ),
             )
-        self.fusion = fusion_cls(**fusion_kwargs)
+        if fusion_type == "self_attention":
+            if tactile_output_dim:
+                raise ValueError("self_attention fusion currently expects tactile history to be disabled")
+            self.fusion = ModalitySelfAttentionFusionEncoder(
+                modality_dims=[current_force_output_dim, state_output_dim, action_output_dim, visual_output_dim],
+                embed_dim=int(fusion_cfg.get("embed_dim", fusion_cfg.get("hidden_dim", 96))),
+                output_dim=fusion_output_dim,
+                num_heads=int(fusion_cfg.get("num_heads", 4)),
+                ffn_dim=int(fusion_cfg.get("ffn_dim", 192)),
+                dropout=float(fusion_cfg.get("dropout", 0.1)),
+            )
+        elif fusion_type == "pairwise_cross_attention":
+            if tactile_output_dim:
+                raise ValueError("pairwise_cross_attention currently expects tactile history to be disabled")
+            self.fusion = PairwiseCrossAttentionFusionEncoder(
+                modality_dims=[current_force_output_dim, state_output_dim, action_output_dim, visual_output_dim],
+                embed_dim=int(fusion_cfg.get("embed_dim", fusion_cfg.get("hidden_dim", 96))),
+                output_dim=fusion_output_dim,
+                num_heads=int(fusion_cfg.get("num_heads", 4)),
+                num_tokens=int(fusion_cfg.get("num_tokens", 4)),
+                ffn_dim=int(fusion_cfg.get("ffn_dim", 192)),
+                dropout=float(fusion_cfg.get("dropout", 0.1)),
+            )
+        else:
+            self.fusion = fusion_cls(**fusion_kwargs)
         self.force_film_enabled = bool(force_film_cfg.get("enabled", False))
         self.force_film = None
         if self.force_film_enabled:
@@ -733,11 +1050,49 @@ class TactileResidualACT(nn.Module):
                 f"{decoder_input_dim} vs {fusion_output_dim}."
             )
 
+        self.use_timestep_modality_gate = bool(
+            fusion_cfg.get("use_timestep_modality_gate", False)
+        )
+        self.timestep_modality_gate = None
+        if self.use_timestep_modality_gate:
+            timestep_modality_dims = []
+            if tactile_output_dim:
+                timestep_modality_dims.append(tactile_output_dim)
+            timestep_modality_dims += [
+                current_force_output_dim,
+                state_output_dim,
+                action_output_dim,
+            ]
+            if visual_output_dim:
+                timestep_modality_dims.append(visual_output_dim)
+            self.timestep_modality_gate = TimestepModalityGate(
+                modality_dims=timestep_modality_dims,
+                context_dim=fusion_output_dim,
+                output_dim=decoder_input_dim,
+                action_horizon=self.action_horizon,
+                action_dim=self.action_dim,
+                hidden_dim=int(fusion_cfg.get("timestep_gate_hidden_dim", 32)),
+                step_embedding_dim=int(
+                    fusion_cfg.get("timestep_gate_embedding_dim", 16)
+                ),
+                temperature=float(
+                    fusion_cfg.get("timestep_gate_temperature", 1.5)
+                ),
+                residual_scale=float(
+                    fusion_cfg.get("timestep_gate_residual_scale", 0.5)
+                ),
+            )
+
         self.decoder = ResidualDecoder(
             input_dim=decoder_input_dim,
             hidden_dim=int(decoder_cfg.get("hidden_dim", 256)),
             action_horizon=1 if self.single_step_delta else self.action_horizon,
             action_dim=self.action_dim,
+            per_step=self.use_timestep_modality_gate,
+            temporal=bool(decoder_cfg.get("use_temporal_decoder", False)),
+            temporal_num_heads=int(decoder_cfg.get("temporal_num_heads", 4)),
+            temporal_ffn_dim=int(decoder_cfg.get("temporal_ffn_dim", 128)),
+            dropout=float(decoder_cfg.get("dropout", 0.1)),
         )
 
 
@@ -845,16 +1200,35 @@ class TactileResidualACT(nn.Module):
 
 
         # Contributions live in the fusion hidden space, whose width is configurable.
+        is_token_fusion = isinstance(self.fusion, (MultiHeadFusionEncoder, ModalitySelfAttentionFusionEncoder, PairwiseCrossAttentionFusionEncoder))
+        # Initialize contribution tensors for every fusion type.  The multihead
+        # branch uses the concatenated input directly, so it previously skipped
+        # the assignments below and failed when metrics were requested.
+        c_t = tactile_feature
+        c_cf = current_force_feature
+        c_s = state_feature
+        c_a = action_feature
+        c_v = visual_feature
         if isinstance(self.fusion, MultiHeadFusionEncoder):
-            z, fusion_attention = self.fusion(feature, return_attention=return_feature_metrics)
-            c_t = tactile_feature
-            c_cf = current_force_feature
-            c_s = state_feature
-            c_a = action_feature
-            c_v = visual_feature
+            fusion_result = self.fusion(feature, return_attention=return_feature_metrics)
+        elif isinstance(self.fusion, ModalitySelfAttentionFusionEncoder):
+            fusion_result = self.fusion(
+                [current_force_feature, state_feature, action_feature, visual_feature],
+                return_attention=return_feature_metrics,
+            )
+        elif isinstance(self.fusion, PairwiseCrossAttentionFusionEncoder):
+            fusion_result = self.fusion(
+                [current_force_feature, state_feature, action_feature, visual_feature],
+                return_attention=return_feature_metrics,
+            )
         else:
             fusion_input_layer = self.fusion.encoder[0]
-        if isinstance(self.fusion, MultiHeadFusionEncoder):
+        if is_token_fusion:
+            if return_feature_metrics:
+                z, fusion_attention = fusion_result
+            else:
+                z, fusion_attention = fusion_result, None
+        if is_token_fusion:
             tactile_dim = tactile_feature.shape[-1] if tactile_feature is not None else 0
             expected_fusion_dim = feature.shape[-1]
         else:
@@ -865,26 +1239,26 @@ class TactileResidualACT(nn.Module):
         expected_fusion_dim = tactile_dim + current_force_dim + state_dim + action_dim
         if visual_feature is not None:
             expected_fusion_dim += visual_feature.shape[-1]
-        if not isinstance(self.fusion, MultiHeadFusionEncoder) and fusion_input_layer.in_features != expected_fusion_dim:
+        if not is_token_fusion and fusion_input_layer.in_features != expected_fusion_dim:
             raise RuntimeError(
                 "Fusion input dimensions do not match encoded modality dimensions: "
                 f"{fusion_input_layer.in_features} vs {expected_fusion_dim}."
             )
 
-        if isinstance(self.fusion, MultiHeadFusionEncoder):
+        if is_token_fusion:
             fusion_weight = None
         else:
             fusion_weight = fusion_input_layer.weight
-        if isinstance(self.fusion, MultiHeadFusionEncoder):
+        if is_token_fusion:
             pass
         else:
             c_t = None
-        if not isinstance(self.fusion, MultiHeadFusionEncoder) and tactile_feature is not None:
+        if not is_token_fusion and tactile_feature is not None:
             c_t = torch.nn.functional.linear(
                 tactile_feature,
                 fusion_weight[:, :tactile_dim],
             )
-        if not isinstance(self.fusion, MultiHeadFusionEncoder):
+        if not is_token_fusion:
           c_cf = torch.nn.functional.linear(
             current_force_feature,
             fusion_weight[
@@ -892,7 +1266,7 @@ class TactileResidualACT(nn.Module):
                 tactile_dim:tactile_dim + current_force_dim,
             ],
           )
-        if not isinstance(self.fusion, MultiHeadFusionEncoder):
+        if not is_token_fusion:
           c_s = torch.nn.functional.linear(
             state_feature,
             fusion_weight[
@@ -900,7 +1274,7 @@ class TactileResidualACT(nn.Module):
                 tactile_dim + current_force_dim:tactile_dim + current_force_dim + state_dim,
             ],
           )
-        if not isinstance(self.fusion, MultiHeadFusionEncoder):
+        if not is_token_fusion:
           c_a = torch.nn.functional.linear(
             action_feature,
             fusion_weight[
@@ -909,9 +1283,9 @@ class TactileResidualACT(nn.Module):
                 tactile_dim + current_force_dim + state_dim + action_dim,
             ],
           )
-        if not isinstance(self.fusion, MultiHeadFusionEncoder):
+        if not is_token_fusion:
           h_pre = (c_t if c_t is not None else 0.0) + c_cf + c_s + c_a + fusion_input_layer.bias
-        if not isinstance(self.fusion, MultiHeadFusionEncoder) and visual_feature is not None:
+        if not is_token_fusion and visual_feature is not None:
             c_v = torch.nn.functional.linear(
                 visual_feature,
                 fusion_weight[
@@ -921,8 +1295,24 @@ class TactileResidualACT(nn.Module):
             )
             h_pre = h_pre + c_v
 
-        if not isinstance(self.fusion, MultiHeadFusionEncoder):
+        if not is_token_fusion:
           z=self.fusion.encoder[1:](h_pre)
+        timestep_gate_weights = None
+        if self.use_timestep_modality_gate:
+            timestep_features = []
+            if tactile_feature is not None:
+                timestep_features.append(tactile_feature)
+            timestep_features += [
+                current_force_feature,
+                state_feature,
+                action_feature,
+            ]
+            if visual_feature is not None:
+                timestep_features.append(visual_feature)
+            z, timestep_gate_weights = self.timestep_modality_gate(
+                z, timestep_features, action_chunk=act_chunk
+            )
+
         if self.force_film_enabled:
             z = self.force_film(z, current_force_feature)
 
@@ -935,7 +1325,31 @@ class TactileResidualACT(nn.Module):
             if isinstance(self.fusion, MultiHeadFusionEncoder):
                 feature_metrics = {
                     "fusion_head_weights": fusion_attention["head_weights"],
+                    "fusion_gate_weights": fusion_attention["gate_weights"],
                     "fusion_modality_weights": fusion_attention["modality_weights"],
+                    "fusion_head_outputs": fusion_attention["head_outputs"],
+                }
+                if timestep_gate_weights is not None:
+                    feature_metrics["fusion_timestep_modality_gate_weights"] = (
+                        timestep_gate_weights
+                    )
+                    feature_metrics["fusion_timestep_modality_gate_mean"] = (
+                        timestep_gate_weights.mean(dim=(0, 1))
+                    )
+                    feature_metrics["fusion_timestep_modality_gate_entropy"] = (
+                        -(timestep_gate_weights.clamp_min(1e-8)
+                          * timestep_gate_weights.clamp_min(1e-8).log())
+                        .sum(dim=-1)
+                        .mean()
+                    )
+            elif isinstance(self.fusion, ModalitySelfAttentionFusionEncoder):
+                feature_metrics = {
+                    "fusion_attention_weights": fusion_attention["attention_weights"],
+                }
+            elif isinstance(self.fusion, PairwiseCrossAttentionFusionEncoder):
+                feature_metrics = {
+                    "fusion_pair_attention_weights": fusion_attention["pair_attention_weights"],
+                    "fusion_pair_weights": fusion_attention["pair_weights"],
                 }
             else:
                 feature_metrics = {}
@@ -1412,8 +1826,28 @@ class TactileMagnitudeWeightedMSE(nn.Module):
                     metrics["visual_encoder_rms"] = feature_metrics["visual_encoder_rms"]
                 if "fusion_head_weights" in feature_metrics:
                     metrics["fusion_head_weights"] = feature_metrics["fusion_head_weights"]
+                if "fusion_gate_weights" in feature_metrics:
+                    metrics["fusion_gate_weights"] = feature_metrics["fusion_gate_weights"]
                 if "fusion_modality_weights" in feature_metrics:
                     metrics["fusion_modality_weights"] = feature_metrics["fusion_modality_weights"]
+                if "fusion_head_outputs" in feature_metrics:
+                    metrics["fusion_head_outputs"] = feature_metrics["fusion_head_outputs"]
+                if "fusion_timestep_modality_gate_weights" in feature_metrics:
+                    metrics["fusion_timestep_modality_gate_weights"] = feature_metrics[
+                        "fusion_timestep_modality_gate_weights"
+                    ]
+                for key in (
+                    "fusion_timestep_modality_gate_mean",
+                    "fusion_timestep_modality_gate_entropy",
+                ):
+                    if key in feature_metrics:
+                        metrics[key] = feature_metrics[key]
+                if "fusion_attention_weights" in feature_metrics:
+                    metrics["fusion_attention_weights"] = feature_metrics["fusion_attention_weights"]
+                if "fusion_pair_attention_weights" in feature_metrics:
+                    metrics["fusion_pair_attention_weights"] = feature_metrics["fusion_pair_attention_weights"]
+                if "fusion_pair_weights" in feature_metrics:
+                    metrics["fusion_pair_weights"] = feature_metrics["fusion_pair_weights"]
 
                 # VQ-VAE token ID
                 if "vqvae_token_id" in feature_metrics:
@@ -1513,6 +1947,17 @@ class TactileMagnitudeWeightedMSE(nn.Module):
 
         # 添加modality contribution（如果有）
         if feature_metrics is not None:
+            for key in (
+                "fusion_head_weights",
+                "fusion_gate_weights",
+                "fusion_modality_weights",
+                "fusion_head_outputs",
+                "fusion_timestep_modality_gate_weights",
+                "fusion_timestep_modality_gate_mean",
+                "fusion_timestep_modality_gate_entropy",
+            ):
+                if key in feature_metrics:
+                    metrics[key] = feature_metrics[key]
             metrics["tactile_contribution_ratio"] = feature_metrics.get("tactile_contribution_ratio", torch.tensor(0.0))
             metrics["current_force_contribution_ratio"] = feature_metrics.get("current_force_contribution_ratio", torch.tensor(0.0))
             metrics["state_contribution_ratio"] = feature_metrics.get("state_contribution_ratio", torch.tensor(0.0))

@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Residual ACT 过拟合实验总结</title>
+<style>
+@page { size: A4; margin: 2cm 2.2cm; }
+body { font-family: "Noto Sans CJK SC", "Source Han Sans CN", "Microsoft YaHei", sans-serif; font-size: 11pt; line-height: 1.65; color: #222; }
+h1 { font-size: 25pt; color: #17365d; margin: 0 0 8pt; }
+h2 { font-size: 16pt; color: #244a73; border-bottom: 1px solid #9fbad0; padding-bottom: 4pt; margin-top: 22pt; }
+h3 { font-size: 12.5pt; color: #244a73; margin-bottom: 2pt; }
+p { margin: 6pt 0; }
+ul { margin-top: 4pt; }
+.cover { text-align: center; margin-top: 7cm; page-break-after: always; }
+.subtitle { color: #666; font-size: 13pt; }
+.summary { border: 1px solid #7aa7c7; background: #eef6fb; padding: 12pt; margin: 12pt 0; }
+.result { border-left: 5px solid #6aa84f; padding: 5pt 10pt; margin: 10pt 0; background: #f3f9f1; }
+.rejected { border-left-color: #cc0000; background: #fff4f3; }
+.metric { font-size: 14pt; font-weight: bold; color: #17365d; }
+.page { page-break-before: always; }
+table { border-collapse: collapse; width: 100%; margin: 8pt 0 14pt; }
+th, td { border: 1px solid #9aa0a6; padding: 5pt 7pt; text-align: left; }
+th { background: #eaf1f8; }
+.small { font-size: 9pt; color: #666; }
+code { font-family: monospace; font-size: 9pt; }
+</style>
+</head>
+<body>
+<section class="cover">
+<h1>Residual ACT<br>过拟合实验总结</h1>
+<p class="subtitle">TactileEncoder · 单任务触觉/状态条件策略</p>
+<p>实验日期：2026-08-20</p>
+<p class="small">本报告整理训练、验证、测试轨迹分析，以及采样、噪声、模型结构和离线 DAgger 代理实验。</p>
+</section>
+
+<h2>一、结论先行</h2>
+<div class="summary"><b>当前最佳方案：</b>每个 episode 随机采样 25%窗口，并对当前力输入加入 10%相对高斯噪声。最佳 test loss 为 <span class="metric">7.8585</span>。</div>
+<p>该方案降低了过拟合，但没有彻底消除。训练 loss 继续下降时，验证和测试 loss 在若干轮后回升。综合多轮对照，根因更接近训练 episode 与测试 episode 之间的状态转移、时序受力模式和动作模式覆盖不足，而不是单纯模型过大。</p>
+<p>重新排列已有离线窗口不能等价实现 DAgger。真正的 DAgger 需要当前策略运行产生偏离状态，再由专家给出纠正动作。</p>
+
+<h2>二、数据与训练基线</h2>
+<table><tr><th>项目</th><th>设置</th></tr>
+<tr><td>数据规模</td><td>约390个 episode</td></tr>
+<tr><td>划分方式</td><td>完整 episode 划分，训练/验证/测试=80%/10%/10%，seed=11</td></tr>
+<tr><td>缓存</td><td><code>outputs/act_cache/act_cache_450.pt</code></td></tr>
+<tr><td>窗口</td><td><code>window_stride=1</code>，训练每个 episode 随机采样25%</td></tr>
+<tr><td>输入</td><td>当前力12维、状态6维、ACT action chunk为30×6</td></tr>
+<tr><td>监控</td><td>每个epoch记录train/val/test；测试连续3轮上升时自动早停</td></tr></table>
+
+<h2>三、实验对照结果</h2>
+<table><tr><th>方案</th><th>最佳 test loss</th><th>判断</th></tr>
+<tr><td>Baseline</td><td>7.9215</td><td>原始基线，第4轮达到最低。</td></tr>
+<tr><td>随机窗口25%</td><td>7.9329</td><td>没有超过最佳方案。</td></tr>
+<tr><td>随机窗口50%</td><td>7.9685</td><td>增加窗口数量没有改善。</td></tr>
+<tr><td>当前力噪声5%</td><td>7.8964</td><td>有改善。</td></tr>
+<tr><td><b>当前力噪声10%</b></td><td><b>7.8585</b></td><td><b>当前最佳。</b></td></tr>
+<tr><td>当前力增益±20%</td><td>7.8820</td><td>略有改善，但不如10%噪声。</td></tr>
+<tr><td>当前力归一化</td><td>8.0228</td><td>变差；绝对受力幅值可能是任务信息。</td></tr>
+<tr><td>高/低受力均衡采样</td><td>8.1544</td><td>破坏 episode 内时序比例，变差。</td></tr>
+<tr><td>学习率5e-5</td><td>8.1578</td><td>收敛更慢且泛化变差。</td></tr>
+<tr><td>Force-FiLM</td><td>7.9693</td><td>结构增强不如简单输入噪声。</td></tr>
+<tr><td>离线 DAgger proxy</td><td>验证集选点对应7.9483</td><td>测试最低7.8255不是有效选择；按验证集选点后没有改善。</td></tr>
+<tr><td>验证集联合分布采样</td><td>8.0842</td><td>破坏时间结构，第12轮早停。</td></tr>
+<tr><td>action噪声5%+力噪声10%</td><td>7.9708</td><td>动作扰动过强，已恢复2%。</td></tr></table>
+
+<h2 class="page">四、数据分布审计</h2>
+<p>训练、验证、测试的整体均值相近，但测试集中存在训练覆盖不足的联合尾部模式：</p>
+<ul><li>测试 episode 348、355、340、342 具有较高受力与较低动作范数的组合。</li>
+<li>另有若干测试 episode 呈现低受力、高动作模式。</li>
+<li>因此只看全局均值会掩盖“受力—动作—时序”联合分布差异。</li></ul>
+<div class="result"><b>解释：</b>增加100条样本只有在它们带来新的 episode 状态转移或覆盖这些联合尾部模式时才会有效；如果只是增加相邻窗口，样本数增加不等于有效覆盖增加。</div>
+
+<h2>五、论文依据</h2>
+<h3>DART：噪声注入</h3><p>通过扰动示范状态/动作，使训练分布更接近策略执行分布。本项目中当前力5%和10%噪声带来改善，但 action噪声5%反而损害条件信息。</p>
+<h3>连续动作模仿学习理论</h3><p>离线示范分布上的低误差不保证闭环执行误差低；当专家轨迹不够分散时，策略执行可能进入训练分布外状态。</p>
+<h3>HYDRA 与动作表示</h3><p>动作抽象和动作重标注会影响协变量偏移，说明 action chunk 的时间结构不能简单打散。</p>
+<h3>FiLM</h3><p>条件调制结构有理论依据，但本项目实验证明，在数据覆盖不足时，结构增强没有超过输入扰动。</p>
+<p class="small">参考：DART（Laskey et al., PMLR 2018）；The Pitfalls of Imitation Learning when Actions are Continuous（Simchowitz et al., COLT 2025）；HYDRA（Belkhale et al., 2023）；FiLM（Perez et al., AAAI 2018）。</p>
+
+<h2>六、最终配置与模型文件</h2>
+<ul><li><code>current_force_noise_std: 0.10</code></li><li><code>action_noise_std: 0.02</code></li><li><code>train_window_fraction: 0.25</code></li><li><code>match_val_distribution: false</code></li><li><code>hard_replay_fraction: 0.0</code></li></ul>
+<p>最佳 checkpoint：<code>residual_actmodel/experiments/force_noise10_monitor/checkpoint_best.pth</code></p>
+
+<h2>七、结论与下一步</h2>
+<div class="summary"><b>结论：</b>当前过拟合主要受数据覆盖和闭环协变量偏移限制；继续压缩模型、改变窗口比例或重复已有离线窗口，预计收益有限。</div>
+<p>最有依据的下一步是：让当前策略在线运行，记录偏离专家轨迹的状态，再由专家提供纠正动作，重新生成真正的 DAgger 数据。如果具备安全环境和奖励信号，可进一步采用冻结 ACT/BC 先验的闭环 residual RL。</p>
+</body></html>

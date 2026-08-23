@@ -1,0 +1,141 @@
+\documentclass[UTF8,a4paper,11pt,fontset=none]{ctexart}
+\setCJKmainfont{Noto Serif CJK SC}
+\setCJKsansfont{Noto Sans CJK SC}
+\setCJKmonofont{Noto Sans Mono CJK SC}
+\usepackage[a4paper,margin=2.0cm]{geometry}
+\usepackage{booktabs,longtable,array,tabularx,xcolor,hyperref}
+\usepackage{graphicx}
+\usepackage{fancyhdr}
+\definecolor{navy}{RGB}{23,54,93}
+\definecolor{bluegray}{RGB}{234,241,248}
+\definecolor{greenbg}{RGB}{236,247,234}
+\hypersetup{colorlinks=true,linkcolor=navy,urlcolor=navy}
+\setlength{\parindent}{2em}
+\setlength{\parskip}{0.35em}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{457-episode 模态删减实验}
+\fancyhead[R]{TactileEncoder}
+\fancyfoot[C]{\thepage}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+
+\title{\textcolor{navy}{457-episode Residual ACT 模态删减实验阶段报告}}
+\author{TactileEncoder 项目}
+\date{2026年8月21日}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+
+\begin{center}
+\fbox{\parbox{0.9\textwidth}{\centering
+\textbf{阶段结论}\par
+\vspace{0.4em}
+截至 2026 年 8 月 21 日下午，五组模态删减实验均已完成前 8 个 epoch，并已进入第 9 个 epoch，尚未触发早停。
+当前 best test loss 排名为：\textbf{Full} $\approx$ \textbf{No State} $<$ \textbf{No Force} $<$ \textbf{No Visual} $<$ \textbf{No Visual + Force}。
+这说明在当前 457-episode 单任务数据集上，视觉、力和状态分支都提供了可用信息，其中视觉与当前力同时去除时退化最明显。}}
+\end{center}
+
+\section{实验目标}
+本轮实验聚焦于 457 个 episode 单任务数据集上的模态删减（modality ablation）分析。目标不是单纯比较 loss 大小，而是回答两个问题：
+\begin{enumerate}
+\item 哪些输入模态真正支撑了 test 集泛化；
+\item 当前出现的过拟合更像是模型容量问题，还是更像数据覆盖不足问题。
+\end{enumerate}
+
+\section{固定实验设置}
+\begin{tabularx}{\textwidth}{>{\bfseries}p{0.26\textwidth}Y}
+\toprule
+项目 & 设置 \\
+\midrule
+数据集 & \texttt{/home/yang/TactileEncoder/dataset/so101/400\_50hil\_820} \\
+episode 数量 & 457 \\
+划分方式 & 按完整 episode 划分 train/val/test = 365/46/46 \\
+随机种子 & 11 \\
+ACT cache & \texttt{/home/yang/TactileEncoder/outputs/act\_cache/act\_cache\_400\_50hil\_820.pt} \\
+加载模式 & \texttt{use\_cache\_loader=true} \\
+窗口步长 & \texttt{window\_stride=1} \\
+训练窗口采样 & \texttt{train\_window\_fraction=0.25} \\
+每 epoch 训练步数 & 3373 \\
+batch size & 16 \\
+epoch 上限 & 30 \\
+过拟合监控 & 每 10 分钟检查一次；epoch 级 test loss 连续上升 3 次时早停 \\
+\bottomrule
+\end{tabularx}
+
+\section{模态删减设置}
+本轮并行启动了 5 组实验，均基于同一套 split、同一套 cache 和同一训练超参数，只通过固定置零的方式移除条件模态：
+\begin{enumerate}
+\item Full：保留全部模态；
+\item No Visual：将 \texttt{act\_visual\_tokens} 置零；
+\item No Force：将 \texttt{current\_force} 置零；
+\item No State：将 \texttt{observation.state} 置零；
+\item No Visual + Force：同时移除视觉和当前力。
+\end{enumerate}
+
+这种实现方式保证了比较聚焦于“该模态是否对泛化有贡献”，而不是混入新的采样偏差。
+
+\section{当前结果（截至 epoch 8）}
+\begin{longtable}{p{0.24\textwidth}r r r r}
+\toprule
+实验 & train loss & val loss & test loss & best test \\
+\midrule
+Full & 7.7742 & 8.2515 & 10.9310 & \colorbox{greenbg}{\textbf{10.1133}} \\
+No State & 7.8533 & 8.3109 & 10.9019 & 10.1193 \\
+No Force & 7.9252 & 8.7262 & 11.8117 & 10.4256 \\
+No Visual & 10.4487 & 8.6906 & 10.8191 & 10.8191 \\
+No Visual + Force & 11.2276 & 9.0745 & 11.9113 & 11.9113 \\
+\bottomrule
+\end{longtable}
+
+\section{结果解释}
+从前 8 个 epoch 的趋势看，五组实验尚未出现连续三轮 test loss 恶化，因此当前还不能把这轮模态删减实验判定为已经进入稳定过拟合阶段。第 6 轮 Full、No Visual、No Force、No State 出现过一次 test loss 回升，但第 7 轮大多刷新最佳；第 8 轮 No Visual 和 No Visual + Force 继续刷新最佳，而 Full、No Force、No State 再次出现单轮回升。
+
+但模态重要性已经比较清楚：
+\begin{enumerate}
+\item Full 与 No State 的 best test loss 最接近，说明状态分支有帮助但不是当前泛化的主导信息源；
+\item 去掉 current force 或 visual 会带来更明显退化，说明这两个模态都在提供泛化收益；
+\item 同时去掉 visual 和 current force 后退化最大，说明二者并非简单替代关系；
+\item 第 8 轮的单轮回升还不能作为早停证据，需要继续观察第 9--10 轮。
+\end{enumerate}
+
+因此，“把模型参数缩小很多但仍能学习”并不能直接证明数据完全一致；更准确的解释是：在当前单任务数据中，模型仍能从视觉、当前力和状态里学到稳定的短期预测线索，但跨 episode 的泛化难度依然存在。
+
+\section{关于过拟合监控的说明}
+当前线上监控已经满足以下两点：
+\begin{enumerate}
+\item 五组实验都在后台持续运行；
+\item 每 10 分钟自动读取 loss 历史，并在 epoch 级 test loss 连续恶化时准备早停。
+\end{enumerate}
+
+但用户要求中的“最近 10 个 episode 中超过 70\% 出现过拟合就停止”目前\textbf{尚未被正在运行的旧训练进程直接执行}。原因是这些进程启动时，训练主流程只记录按 epoch 聚合后的 train/val/test loss，而不是每个 test episode 的单独 loss 曲线。
+
+为补齐这一证据链，已经新增 \texttt{residual\_actmodel/evaluate\_episode\_overfit.py}，可按 \texttt{episode\_index} 输出 test/val episode loss，并比较最近 10 个 episode 的恶化比例。脚本已在 Full 组 \texttt{checkpoint\_best.pth} 上验证通过，生成了 \texttt{episode\_eval/test\_episode\_loss\_epoch\_005.csv}。此外，训练脚本已新增 \texttt{checkpoint\_latest.pth} 保存逻辑，后续重启或新实验可直接对当前 epoch 执行 episode 级 70\% 判据。
+
+\section{阶段性判断}
+基于目前这组 457-episode、25\% 训练窗口采样到 epoch 8 的结果，可以先得到一个保守结论：
+
+\begin{quote}
+\colorbox{bluegray}{\parbox{0.92\textwidth}{
+当前泛化表现并不是由某一个“有害模态”主导的；相反，视觉、当前力、状态都在贡献信息，其中视觉与当前力贡献更大。若后续重新出现明显过拟合，更可能来自 episode 间动作--受力--状态转移覆盖不足，而不是因为多加了某个模态。}}
+\end{quote}
+
+\section{运行状态}
+截至本报告生成时：
+\begin{enumerate}
+\item 五组实验均已完成第 8 个 epoch，并已进入第 9 个 epoch；
+\item 没有任何一组触发早停；
+\item 10 分钟轮询监控仍在后台运行；
+\item 当前旧训练进程没有 \texttt{checkpoint\_latest.pth}，但代码已为后续重启和新实验补上该保存点。
+\end{enumerate}
+
+\section*{附录：当前实验目录}
+\begin{enumerate}
+\item \texttt{residual\_actmodel/experiments/400\_50hil\_820\_ablation25\_full}
+\item \texttt{residual\_actmodel/experiments/400\_50hil\_820\_ablation25\_no\_visual}
+\item \texttt{residual\_actmodel/experiments/400\_50hil\_820\_ablation25\_no\_force}
+\item \texttt{residual\_actmodel/experiments/400\_50hil\_820\_ablation25\_no\_state}
+\item \texttt{residual\_actmodel/experiments/400\_50hil\_820\_ablation25\_no\_visual\_force}
+\end{enumerate}
+
+\end{document}

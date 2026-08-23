@@ -23,8 +23,8 @@ from lerobot.policies.factory import (
 
 @dataclass(frozen=True)
 class DatasetKeys:
-    tactile_type: str  # "image", "force", or "vqvae"
-    tactile_force: str | list[str]
+    tactile_type: str | None = None  # "image", "force", or "vqvae"
+    tactile_force: str | list[str] | None = None
     current_force: str | list[str] | None = None  # 可选：残差网络模式需要
     state: str | None = None  # 可选：残差网络模式需要
     expert_action: str | None = None  # 可选：残差网络模式需要
@@ -34,6 +34,8 @@ class DatasetKeys:
     @property
     def tactile(self) -> str | list[str]:
         """根据 tactile_type 返回对应的触觉键"""
+        if self.tactile_type is None:
+            raise ValueError("当前配置未启用触觉输入")
         if self.tactile_type == "image":
             if self.tactile_image is None:
                 raise ValueError("tactile_type='image' 时必须提供 tactile_image 键")
@@ -496,6 +498,14 @@ class TactileACTDataset(Dataset):
         if expert_action is not None:
             output["expert_action"] = expert_action
 
+        # 机器人状态（独立于act_observation_keys，缓存模式下也需要）
+        if self.keys.state is not None:
+            state = sample[self.keys.state].float()
+            # 如果state有时间维度，取最后一帧
+            if state.ndim > 1 and state.shape[0] > 1:
+                state = state[-1]
+            output[self.keys.state] = state
+
         # 原样返回ACT需要的当前观测。
         # 注意：触觉键如果在这里，需要特殊处理（取最后一帧）
         tactile_keys_set = {self.keys.tactile} if isinstance(self.keys.tactile, str) else set(self.keys.tactile)
@@ -832,7 +842,9 @@ def check_dataset_features(
     available = set(dataset.features.keys())
 
     # 处理单个或多个触觉键
-    if isinstance(keys.tactile, str):
+    if keys.tactile_type is None:
+        tactile_keys = set()
+    elif isinstance(keys.tactile, str):
         tactile_keys = {keys.tactile}
     else:
         tactile_keys = set(keys.tactile)
@@ -894,7 +906,9 @@ def build_base_dataset(
     fps = int(metadata_dataset.fps)
 
     # 根据触觉类型选择对应的历史长度
-    if keys.tactile_type == "image":
+    if keys.tactile_type is None:
+        tactile_history_length = 1
+    elif keys.tactile_type == "image":
         tactile_history_length = int(sequence_cfg["tactile_history_image"])
     elif keys.tactile_type in ("force", "vqvae"):
         tactile_history_length = int(sequence_cfg["tactile_history_force"])
@@ -909,9 +923,9 @@ def build_base_dataset(
     delta_timestamps = {}
 
     # 为每个触觉键分配相同的历史时间戳
-    if isinstance(keys.tactile, str):
+    if keys.tactile_type is not None and isinstance(keys.tactile, str):
         delta_timestamps[keys.tactile] = tactile_history_timestamps
-    else:
+    elif keys.tactile_type is not None:
         for tactile_key in keys.tactile:
             delta_timestamps[tactile_key] = tactile_history_timestamps
 
@@ -949,8 +963,14 @@ def build_normal_dataloaders(
 
     keys = DatasetKeys(**dataset_cfg["keys"])
 
-    # VQ-VAE模式下不需要act_observation_keys
-    act_observation_keys = dataset_cfg.get("act_observation_keys", [])
+    # 离线缓存模式下，act_chunk/act_visual都从缓存读取，
+    # 不再需要视频图像，清空act_observation_keys避免解码视频。
+    act_cache_path = config.get("policy", {}).get("act_cache_path")
+    if act_cache_path:
+        act_observation_keys = []
+        print("使用ACT离线缓存，训练不加载视频图像。")
+    else:
+        act_observation_keys = dataset_cfg.get("act_observation_keys", [])
 
     check_dataset_features(
         dataset=dataset,

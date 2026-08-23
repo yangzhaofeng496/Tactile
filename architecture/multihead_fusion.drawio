@@ -1,0 +1,30 @@
+<mxfile host="65bd71144e">
+  <diagram name="Current Multi-Head Fusion" id="multihead-fusion">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2400" pageHeight="1200" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/><mxCell id="1" parent="0"/>
+        <mxCell id="title" value="ResidualACT: Multi-Head Fusion 架构" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=24;fontStyle=1" parent="1" vertex="1"><mxGeometry x="600" y="30" width="900" height="50" as="geometry"/></mxCell>
+        <mxCell id="stage1" value="输入特征" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=16;fontStyle=1" parent="1" vertex="1"><mxGeometry x="40" y="100" width="240" height="30" as="geometry"/></mxCell>
+        <mxCell id="inputs" value="Encoded modalities&#xa;current_force [B,36]&#xa;state [B,36]&#xa;action chunk [B,72]&#xa;visual [B,72]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13" parent="1" vertex="1"><mxGeometry x="40" y="260" width="240" height="150" as="geometry"/></mxCell>
+        <mxCell id="stage2" value="特征拼接" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=16;fontStyle=1" parent="1" vertex="1"><mxGeometry x="340" y="100" width="220" height="30" as="geometry"/></mxCell>
+        <mxCell id="concat" value="特征拼接&#xa;current_force + state + action + visual&#xa;输出: [B,216]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;fontStyle=1" parent="1" vertex="1"><mxGeometry x="330" y="270" width="240" height="120" as="geometry"/></mxCell>
+        <mxCell id="stage3" value="Multi-Head Fusion" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=16;fontStyle=1" parent="1" vertex="1"><mxGeometry x="650" y="100" width="360" height="30" as="geometry"/></mxCell>
+        <mxCell id="heads" value="MultiHeadFusionEncoder" style="swimlane;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;fontStyle=1" parent="1" vertex="1"><mxGeometry x="620" y="160" width="430" height="330" as="geometry"/></mxCell>
+        <mxCell id="head_steps" value="4 个独立 Fusion Head&#xa;Linear(216→96) + GELU&#xa;LayerNorm + Dropout&#xa;每个 head 接收相同的 [B,216]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11" parent="heads" vertex="1"><mxGeometry x="20" y="45" width="390" height="110" as="geometry"/></mxCell>
+        <mxCell id="head_norm" value="每个 head 独立归一化&#xa;Head 输出: [B,96]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11" parent="heads" vertex="1"><mxGeometry x="20" y="170" width="390" height="55" as="geometry"/></mxCell>
+        <mxCell id="weights" value="softmax(head_weights)&#xa;4 个全局 head 权重&#xa;加权叠加 → LayerNorm" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;fontStyle=1" parent="1" vertex="1"><mxGeometry x="680" y="515" width="310" height="80" as="geometry"/></mxCell>
+        <mxCell id="stage4" value="残差连接 + FFN" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=16;fontStyle=1" parent="1" vertex="1"><mxGeometry x="1120" y="100" width="300" height="30" as="geometry"/></mxCell>
+        <mxCell id="norm" value="Weighted sum&#xa;LayerNorm → residual connection → FFN&#xa;Fusion output [B,80]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;fontStyle=1" parent="1" vertex="1"><mxGeometry x="1120" y="250" width="300" height="130" as="geometry"/></mxCell>
+        <mxCell id="stage5" value="解码器与输出" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=16;fontStyle=1" parent="1" vertex="1"><mxGeometry x="1510" y="100" width="620" height="30" as="geometry"/></mxCell>
+        <mxCell id="decoder" value="ResidualDecoder&#xa;Linear(80→48) + ReLU&#xa;Linear(48→180)&#xa;Reshape → [B,30,6]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;fontStyle=1" parent="1" vertex="1"><mxGeometry x="1510" y="250" width="300" height="130" as="geometry"/></mxCell>
+        <mxCell id="output" value="30-step delta action&#xa;Δaction [B,30,6]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=14;fontStyle=1" parent="1" vertex="1"><mxGeometry x="1890" y="275" width="240" height="80" as="geometry"/></mxCell>
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;strokeWidth=2;strokeColor=#82b366" edge="1" parent="1" source="inputs" target="concat"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;strokeWidth=2;strokeColor=#82b366" edge="1" parent="1" source="concat" target="heads"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;strokeWidth=2;strokeColor=#82b366" edge="1" parent="1" source="heads" target="norm"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;strokeWidth=2;strokeColor=#82b366" edge="1" parent="1" source="norm" target="decoder"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;strokeWidth=2;strokeColor=#b85450" edge="1" parent="1" source="decoder" target="output"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="note" value="注意：当前模态权重仅记录，不参与实际 Fusion；head 权重为全局共享参数。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12" parent="1" vertex="1"><mxGeometry x="620" y="650" width="800" height="50" as="geometry"/></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -33,7 +33,6 @@ def load_model_checkpoint(checkpoint_path, device="cuda"):
         map_location=device,
         weights_only=False,
     )
-
     config_snapshot = checkpoint.get("config")
     if isinstance(config_snapshot, dict) and "model_config" in config_snapshot:
         config_snapshot = config_snapshot["model_config"]
@@ -120,6 +119,9 @@ def create_model_from_config_dict(config):
         tactile_encoder_type=encoder_type,
         action_horizon=action_horizon,
         action_dim=action_dim,
+        use_tactile_history=bool(
+            config.get('tactile_encoder', {}).get('enabled', True)
+        ),
         tactile_encoder_cfg=encoder_config,
         state_encoder_cfg=config.get('state_encoder'),
         current_force_encoder_cfg=config.get('current_force_encoder'),

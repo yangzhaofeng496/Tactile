@@ -1,0 +1,161 @@
+\documentclass[UTF8,a4paper,11pt,fontset=none]{ctexart}
+\setCJKmainfont{Noto Serif CJK SC}
+\setCJKsansfont{Noto Sans CJK SC}
+\setCJKmonofont{Noto Sans Mono CJK SC}
+\usepackage[a4paper,margin=2.0cm]{geometry}
+\usepackage{booktabs,longtable,array,tabularx,xcolor,colortbl,enumitem,hyperref}
+\usepackage{fancyhdr}
+\definecolor{navy}{RGB}{23,54,93}
+\definecolor{bluegray}{RGB}{234,241,248}
+\definecolor{greenbg}{RGB}{236,247,234}
+\definecolor{redbg}{RGB}{255,244,243}
+\hypersetup{colorlinks=true,linkcolor=navy,urlcolor=navy}
+\setlist{nosep,leftmargin=2em}
+\setlength{\parindent}{2em}
+\setlength{\parskip}{0.35em}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{Residual ACT 过拟合实验总结}
+\fancyhead[R]{TactileEncoder}
+\fancyfoot[C]{\thepage}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcommand{\best}{\colorbox{greenbg}{\textbf{当前最佳：9.7391}}}
+\title{\textcolor{navy}{Residual ACT 过拟合实验总结}}
+\author{TactileEncoder 项目}
+\date{2026年8月21日}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+\begin{center}
+\vspace{1em}
+\large 单任务触觉/状态条件 Residual ACT\par
+\vspace{2em}
+\fbox{\parbox{0.82\textwidth}{\centering\large\textbf{执行摘要}\par\vspace{0.5em}\normalsize 本报告主体数据集为 \textbf{457 个 episode} 的 \texttt{400\_50hil\_820}。当前按验证集选择 checkpoint 的最佳方案为 action noise=0、seed=11，测试 loss 为 \textbf{9.7391}。}}
+\end{center}
+\vfill
+\begin{center}\small 本报告整理数据审计、训练配置、模型与采样实验、论文依据及下一步方案。\end{center}
+\newpage
+
+\section{结论先行}
+本轮实验围绕训练 loss 持续下降、验证集和测试集先下降后回升的问题展开。我们始终按完整 episode 划分训练集、验证集和测试集，避免窗口级随机切分造成轨迹泄漏。
+
+\begin{itemize}
+  \item 当前457-episode数据集上的最佳验证选择结果是 \textbf{action noise=0、seed=11}，测试 loss 为9.7391。
+  \item 旧390-episode数据集的结果只作为历史对照，不用于评价当前457-episode实验。
+  \item 主要瓶颈更接近训练 episode 与测试 episode 之间的状态转移、受力模式和动作模式覆盖不足，而不是单纯模型参数太多。
+  \item 重新排列已有离线窗口不能等价实现 DAgger。真正的 DAgger 需要当前策略运行后的偏离状态及专家纠正动作。
+\end{itemize}
+
+\section{数据与训练基线}
+\begin{tabularx}{\textwidth}{>{\bfseries}p{0.25\textwidth}Y}
+\toprule 项目 & 设置 \\
+\midrule
+数据规模 & 457个 episode、290,905帧 \\
+数据划分 & 完整 episode 划分，训练/验证/测试=365/46/46个 episode，随机种子11 \\
+ACT缓存 & \texttt{outputs/act\_cache/act\_cache\_400\_50hil\_820.pt} \\
+窗口采样 & \texttt{window\_stride=1}，训练每个 episode 随机采样25\%窗口 \\
+输入维度 & 当前力12维、状态6维、ACT action chunk 为30$\times$6 \\
+监控机制 & 每个epoch记录 train/val/test；测试 loss 连续3轮上升时自动早停 \\
+\bottomrule
+\end{tabularx}
+
+\section{旧数据结果说明}
+旧的390-episode数据集结果不再列出具体 test loss，避免与当前457-episode实验混淆。本文所有后续实验数值均来自
+\texttt{dataset/so101/400\_50hil\_820} 及其对应的
+\texttt{act\_cache\_400\_50hil\_820.pt}。
+
+\section{数据分布审计}
+\subsection{数据集版本核对}
+原配置路径 \texttt{dataset/so101/350\_50hil\_811} 的元数据为390个 episode、233,885帧；新路径 \texttt{dataset/so101/400\_50hil\_820} 的元数据为457个 episode（ID 0--456）、290,905帧。现有 \texttt{act\_cache\_450.pt} 有216,725个缓存窗口，覆盖的是旧数据的索引范围，并不能直接代表新数据集已经完成缓存。因此，文件名中的 ``450'' 不是 episode 数量；若要训练新数据集，必须切换 dataset 路径并重新生成对应的 full-cache。
+
+训练、验证和测试的整体均值相近，但测试集中存在训练覆盖不足的联合尾部模式：
+\begin{itemize}
+  \item 测试 episode 348、355、340、342 具有较高受力与较低动作范数的组合；
+  \item 另有若干测试 episode 呈现低受力、高动作模式；
+  \item 只比较全局均值会掩盖“受力--动作--时序”联合分布差异。
+\end{itemize}
+增加100条样本只有在它们带来新的 episode 状态转移，或覆盖上述联合尾部模式时才会有效；如果只是增加相邻窗口，样本数增加不等于有效覆盖增加。
+
+\section{论文依据与方法分析}
+\subsection{DART：噪声注入}
+DART通过扰动示范状态或动作，使训练分布更接近策略执行分布。论文原文短引：\begin{quote}\emph{``by injecting small levels of noise, we will focus on the states that the robot needs to recover from''}\end{quote}
+中文解释：小幅扰动的目的不是制造任意噪声，而是把训练重点移到策略需要恢复的边界状态。本项目中当前力5\%和10\%噪声带来改善，但 action噪声5\%反而损害动作条件信息。来源：\url{https://proceedings.mlr.press/v78/laskey17a/laskey17a.pdf}
+
+\subsection{连续动作模仿学习理论}
+连续控制中，离线示范分布上的低误差不保证闭环执行误差低。论文原文短引：\begin{quote}\emph{``any smooth, deterministic imitator policy necessarily suffers error on execution that is exponentially larger''}\end{quote}
+中文解释：即使策略在专家数据上的误差很小，执行时的误差也可能因状态偏移而快速放大；这与本项目训练 loss 下降而测试 loss 回升的现象一致。来源：\url{https://proceedings.mlr.press/v291/simchowitz25a.html}
+
+\subsection{HYDRA与动作表示}
+HYDRA强调动作表示会影响协变量偏移。论文原文短引：\begin{quote}\emph{``Choosing an action representation for the policy that minimizes this distribution shift is critical in imitation learning.''}\end{quote}
+中文解释：action chunk 的时间结构不能简单打散；这也解释了本项目强行进行受力分布匹配后反而变差。来源：\url{https://arxiv.org/abs/2306.17237}
+
+\subsection{FiLM}
+FiLM提出用条件输入调制中间特征。论文原文短引：\begin{quote}\emph{``a simple, feature-wise affine transformation based on conditioning information''}\end{quote}
+中文解释：当前力条件化融合在结构上是合理的，但本项目实验证明，在数据覆盖不足时，FiLM结构增强没有超过输入扰动。来源：\url{https://ojs.aaai.org/index.php/AAAI/article/download/11671/11530}
+
+\section{457-episode当前配置与 checkpoint}
+\begin{tabularx}{\textwidth}{>{\ttfamily}p{0.45\textwidth}Y}
+\toprule 配置 & 当前值 \\
+\midrule
+current\_force\_noise\_std & 0.05 \\
+action\_noise\_std & 0.00（当前最佳 seed=11） \\
+train\_window\_fraction & 0.25 \\
+match\_val\_distribution & false \\
+hard\_replay\_fraction & 0.0 \\
+\bottomrule
+\end{tabularx}
+\vspace{1em}
+最佳模型文件：\texttt{residual\_actmodel/experiments/400\_50hil\_820\_action\_noise\_000/checkpoint\_best.pth}
+
+\section{最终结论与下一步}
+\begin{quote}\colorbox{bluegray}{\parbox{0.92\textwidth}{当前过拟合主要受数据覆盖和闭环协变量偏移限制；继续压缩模型、改变窗口比例或重复已有离线窗口，预计收益有限。}}
+\end{quote}
+最有依据的下一步是让当前策略在线运行，记录偏离专家轨迹的状态，再由专家提供纠正动作，重新生成真正的 DAgger 数据。如果具备安全环境和奖励信号，可进一步采用冻结 ACT/BC 先验的闭环 residual RL。
+
+\section{新457-episode数据集后续实验状态}
+当前已将配置切换到 \texttt{dataset/so101/400\_50hil\_820}，并使用项目脚本
+\texttt{dataloader/preprocess\_act\_cache.py} 生成
+\texttt{outputs/act\_cache/act\_cache\_400\_50hil\_820.pt}。
+该数据集包含457个 episode、290,905帧和270,797个合法窗口。预处理使用 torchcodec，并在启动前设置
+\texttt{LD\_LIBRARY\_PATH}；本报告后续实验均基于该 cache。此前关于“新实验尚未完成”的说明已过时，现由下一节的实际日志结果替代。
+
+\section{2026-08-21新增实验结果}
+本节记录最近一轮在同一457-episode数据集上的可比实验。训练/验证/测试按完整 episode 划分为365/46/46；验证集用于选择 checkpoint，测试集仅用于诊断过拟合。表中“测试”是验证集选出的 checkpoint 在测试集上的 loss；括号内给出观察到的最低测试 loss，但最低测试点不用于模型选择。
+
+\begin{longtable}{p{0.31\textwidth}r r p{0.34\textwidth}}
+\toprule
+实验 & 验证选中测试 & 最低测试 & 结论 \\
+\midrule
+基线：action噪声0.02 & 9.9504 & 9.9504 & 当前旧基线 \\
+temporal smoothness=0.005 & 10.4571 & 10.0172 & 变差，拒绝 \\
+temporal smoothness=0.02 & 9.9716 & 9.9716 & 略差于基线，拒绝 \\
+state noise=0.025 & 10.0418 & 10.0418 & 变差，拒绝 \\
+state noise=0.075 & 10.0685 & 10.0685 & 变差，拒绝 \\
+随机 batch action consistency & 9.9855 & 9.9855 & 相邻窗口几乎不在同一 batch，机制无效 \\
+强制相邻配对 consistency & 10.2956 & 10.0532 & 改变采样分布，变差 \\
+weight decay=$10^{-4}$ & 9.9504 & 9.9504 & 与基线相同，无收益 \\
+weight decay=$10^{-3}$ & 10.4469 & 10.0581 & 变差，拒绝 \\
+学习率=$5\times10^{-5}$ & 10.5433 & 10.5433 & 收敛变慢，拒绝 \\
+action noise=0.05 & 10.5091 & 10.1057 & 噪声过强，拒绝 \\
+parameter dropout=0.10 & 10.5276 & 13.9584 & 明显破坏条件信息，拒绝 \\
+visual dropout=0.01（干净配置） & 10.2951 & 9.9493 & 最低测试略降，但验证选中结果变差 \\
+action noise=0，seed=11 & 9.7391 & 9.6991 & 当前最优验证选择结果 \\
+action noise=0，seed=17 & 9.7658 & 9.5494 & 存在随机种子敏感性 \\
+action noise=0.02，seed=17 & 9.6755 & 9.4385 & 同seed下优于action noise=0 \\
+\bottomrule
+\end{longtable}
+
+\subsection{解释与实验有效性}
+早期 action consistency 实验使用普通随机 batch，因此不能说明一致性损失本身无效；改用配对 sampler 后结果仍然变差，说明强制相邻配对带来的采样分布变化大于正则项收益。modality dropout 实验同时扰动了输入和 residual target，不能作为纯粹的模态 dropout 结论，已从有效比较中剔除。
+
+严格按验证集选择 checkpoint 后，当前最好结果是 action noise=0、seed=11，测试 loss 为9.7391。训练 loss 继续下降而验证/测试 loss 回升，说明核心问题仍是 episode 间状态--受力--动作联合覆盖不足，而不是单纯模型参数过多。后续应优先采集闭环偏离状态的纠正示范（DAgger），而不是继续重复相邻离线窗口。\texttt{train\_window\_fraction=1.0} 尚无完成记录，因此不纳入比较。
+
+\section*{参考文献}
+\begin{enumerate}
+\item Laskey et al. DART: Noise Injection for Robust Imitation Learning. PMLR 78, 2018.
+\item Simchowitz et al. The Pitfalls of Imitation Learning when Actions are Continuous. COLT, 2025.
+\item Belkhale et al. HYDRA: Hybrid Robot Actions for Imitation Learning, 2023.
+\item Perez et al. FiLM: Visual Reasoning with a General Conditioning Layer. AAAI, 2018.
+\end{enumerate}
+\end{document}

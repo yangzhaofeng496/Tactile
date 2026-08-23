@@ -15,9 +15,9 @@ sequence:
   pad_value: 0.0
 
 split:
-  train: 0.9  # Use 90% for training
+  train: 0.8  # Use 90% for training
   val: 0.1    # Use 10% for validation
-  test: 0.0
+  test: 0.1
   seed: 42
 
 loader:

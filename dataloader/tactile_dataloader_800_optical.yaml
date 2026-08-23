@@ -1,0 +1,52 @@
+# 仅用于 0814_800 光学数据集的 ACT 预处理。
+# 该数据集不包含 observation.tactile.*，因此只能生成 act_chunk/act_visual，
+# 不能使用 --full-cache 生成当前触觉 residual 模型所需的完整输入。
+
+use_cache_loader: false
+
+dataset:
+  repo_id: "/home/yang/TactileEncoder/dataset/0821/0814_800"
+  root: null
+  revision: null
+  video_backend: "torchcodec"
+  keys:
+    tactile_type: null
+    state: "observation.state"
+    expert_action: "action"
+  act_observation_keys:
+    - "observation.state"
+    - "observation.images.left_close"
+    - "observation.images.right_close"
+    - "observation.images.up_cam"
+
+sequence:
+  tactile_history_force: 16
+  action_horizon: 30
+
+policy:
+  type: "act"
+  pretrained_path: "/home/yang/TactileEncoder/outputs/act_compat/300001"
+  revision: null
+  device: "cuda"
+  use_postprocessor: true
+  use_act_visual: true
+  act_cache_path: "/home/yang/TactileEncoder/outputs/act_cache/act_cache_800_optical.pt"
+
+split:
+  train: 0.8
+  val: 0.1
+  test: 0.1
+  seed: 11
+
+loader:
+  batch_size: 16
+  window_stride: 1
+  train_window_fraction: 1.0
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  shuffle_train: false
+  drop_last_train: false
+
+test:
+  num_batches: 2

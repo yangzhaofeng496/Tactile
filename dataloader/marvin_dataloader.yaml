@@ -6,38 +6,12 @@
 use_cache_loader: true
 
 dataset:
-  repo_id: "/home/yang/TactileEncoder/dataset/so101/450+150hil_821_ep340_606"
+  repo_id: "/home/yang/TactileEncoder/dataset/0821/0814_800"
   root: null
   revision: null
   video_backend: "torchcodec"
 
   keys:
-    tactile_type: "vqvae"
-
-    # 历史力数据（VQ-VAE编码器输入）
-    tactile_force:
-      - "observation.tactile.left_force"
-      - "observation.tactile.right_force"
-
-    # 触觉通道顺序（需与model_config和stats文件一致）
-    tactile_force_channel_order:
-      - left_Fx
-      - left_Fy
-      - left_Fz
-      - left_Mx
-      - left_My
-      - left_Mz
-      - right_Fx
-      - right_Fy
-      - right_Fz
-      - right_Mx
-      - right_My
-      - right_Mz
-
-    # 当前力数据（CurrentForceEncoder输入）
-    current_force:
-      - "observation.tactile.left_force"
-      - "observation.tactile.right_force"
 
     # 机器人状态（StateEncoder输入）
     state: "observation.state"
@@ -48,9 +22,9 @@ dataset:
   # ACT策略使用的观测字段
   act_observation_keys:
     - "observation.state"
-    - "observation.images.side"
-    - "observation.images.top"
-    - "observation.images.wrist_cam"
+    - "observation.images.left_close"
+    - "observation.images.up_cam"
+    - "observation.images.right_close"
 
 sequence:
   tactile_history_force: 16  # 历史力时间步数（需与VQ-VAE的history_steps=16一致）
@@ -58,7 +32,7 @@ sequence:
 
 policy:
   type: "act"
-  pretrained_path: "/home/yang/TactileEncoder/actmodel/dm/dm_act_orin_350_reinforce/checkpoints/100000"
+  pretrained_path: "/home/yang/TactileEncoder/dataset/0821/act_peg_optical_module_0814_800_image_transforms/checkpoints/300001"
   revision: null
   device: "cuda"
   use_postprocessor: true
@@ -67,25 +41,25 @@ policy:
   use_act_visual: true
   # 离线预处理缓存：设置后训练直接从缓存读取act_chunk/act_visual，不再实时运行ACT。
   # 生成方式: python dataloader/preprocess_act_cache.py --config dataloader/tactile_dataloader.yaml
-  act_cache_path: "/home/yang/TactileEncoder/outputs/act_cache/act_cache_600.pt"
+  act_cache_path: "/home/yang/TactileEncoder/outputs/act_cache/act_cache_800_optical.pt"
 
 split:
-  train: 0.90
-  val: 0.1
-  test: 0.0
+  train: 0.80
+  val: 0.0
+  test: 0.1
   seed: 11
 
 loader:
   batch_size: 16
   window_stride: 1
-  train_window_fraction: 0.5  # 每个episode随机采样25%合法窗口，保持各组可比并缩短实验周期
+  train_window_fraction: 0.25  # 每个episode随机采样25%合法窗口，保持各组可比并缩短实验周期
   pair_adjacent_windows: false  # action consistency实验专用开关
   balance_current_force: false
   hard_replay_fraction: 0.0  # offline DAgger proxy开关，默认关闭
   match_val_distribution: false  # 仅用验证集的受力-动作联合分布重采样训练窗口
-  num_workers: 0
+  num_workers: 4
   pin_memory: true
-  persistent_workers: false
+  persistent_workers: true
   shuffle_train: true
   drop_last_train: false
 

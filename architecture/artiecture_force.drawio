@@ -153,4 +153,49 @@
             </root>
         </mxGraphModel>
     </diagram>
+    <diagram name="Current Multi-Head Fusion" id="multihead-fusion">
+        <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2400" pageHeight="1200" math="0" shadow="0">
+            <root>
+                <mxCell id="mh0"/><mxCell id="mh1" parent="mh0"/>
+                <mxCell id="mh_title" value="Current ResidualACT: Multi-Head MLP Fusion" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=24;fontStyle=1" parent="mh1" vertex="1"><mxGeometry x="650" y="30" width="900" height="50" as="geometry"/></mxCell>
+                <mxCell id="mh_inputs" value="Encoded modalities&#xa;current_force [B,36]&#xa;state [B,36]&#xa;action chunk [B,72]&#xa;visual [B,72]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;" parent="mh1" vertex="1"><mxGeometry x="40" y="260" width="240" height="150" as="geometry"/></mxCell>
+                <mxCell id="mh_concat" value="Concat&#xa;[B, 216]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=14;fontStyle=1" parent="mh1" vertex="1"><mxGeometry x="360" y="290" width="180" height="80" as="geometry"/></mxCell>
+                <mxCell id="mh_heads" value="4 independent MLP heads&#xa;Linear(216→96) → GELU → LayerNorm → Dropout" style="swimlane;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;fontStyle=1" parent="mh1" vertex="1"><mxGeometry x="620" y="160" width="430" height="330" as="geometry"/></mxCell>
+                <mxCell id="mh_head_detail" value="Head 0 / 1 / 2 / 3&#xa;each receives the same concat vector&#xa;head output: [B,96]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;" parent="mh_heads" vertex="1"><mxGeometry x="25" y="70" width="380" height="100" as="geometry"/></mxCell>
+                <mxCell id="mh_head_weight" value="softmax(global head_weights)&#xa;4 scalar weights&#xa;shared across samples" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;fontStyle=1" parent="mh_heads" vertex="1"><mxGeometry x="25" y="195" width="380" height="80" as="geometry"/></mxCell>
+                <mxCell id="mh_norm" value="Weighted sum&#xa;LayerNorm → residual connection → FFN&#xa;Fusion output [B,80]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;fontStyle=1" parent="mh1" vertex="1"><mxGeometry x="1120" y="250" width="300" height="130" as="geometry"/></mxCell>
+                <mxCell id="mh_decoder" value="Residual Decoder&#xa;Linear(80→48) → ReLU&#xa;Linear(48→180)&#xa;Reshape → [B,30,6]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=13;fontStyle=1" parent="mh1" vertex="1"><mxGeometry x="1510" y="250" width="300" height="130" as="geometry"/></mxCell>
+                <mxCell id="mh_out" value="30-step delta action&#xa;Δaction [B,30,6]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=14;fontStyle=1" parent="mh1" vertex="1"><mxGeometry x="1890" y="275" width="240" height="80" as="geometry"/></mxCell>
+                <mxCell id="mh_e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2;strokeColor=#82b366;" edge="1" parent="mh1" source="mh_inputs" target="mh_concat"><mxGeometry relative="1" as="geometry"/></mxCell>
+                <mxCell id="mh_e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2;strokeColor=#82b366;" edge="1" parent="mh1" source="mh_concat" target="mh_heads"><mxGeometry relative="1" as="geometry"/></mxCell>
+                <mxCell id="mh_e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2;strokeColor=#82b366;" edge="1" parent="mh1" source="mh_heads" target="mh_norm"><mxGeometry relative="1" as="geometry"/></mxCell>
+                <mxCell id="mh_e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2;strokeColor=#82b366;" edge="1" parent="mh1" source="mh_norm" target="mh_decoder"><mxGeometry relative="1" as="geometry"/></mxCell>
+                <mxCell id="mh_e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2;strokeColor=#b85450;" edge="1" parent="mh1" source="mh_decoder" target="mh_out"><mxGeometry relative="1" as="geometry"/></mxCell>
+                <mxCell id="mh_note" value="注意：当前模态权重仅记录，不参与实际 Fusion；head 权重为全局共享参数。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;align=left;" parent="mh1" vertex="1"><mxGeometry x="620" y="560" width="800" height="50" as="geometry"/></mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+    <diagram name="Future Self-Attention Fusion" id="self-attention-fusion">
+        <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2400" pageHeight="1200" math="0" shadow="0">
+            <root>
+                <mxCell id="sa0"/><mxCell id="sa1" parent="sa0"/>
+                <mxCell id="sa_title" value="Future ResidualACT: Modality Token Self-Attention Fusion" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=24;fontStyle=1" parent="sa1" vertex="1"><mxGeometry x="550" y="30" width="1100" height="50" as="geometry"/></mxCell>
+                <mxCell id="sa_input" value="Four encoded modalities&#xa;force [B,36] · state [B,36] · action [B,72] · visual [B,72]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;" parent="sa1" vertex="1"><mxGeometry x="30" y="275" width="310" height="100" as="geometry"/></mxCell>
+                <mxCell id="sa_proj" value="Modality-specific projections&#xa;Linear → 96 dims each&#xa;+ modality embeddings" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;fontStyle=1" parent="sa1" vertex="1"><mxGeometry x="420" y="255" width="300" height="140" as="geometry"/></mxCell>
+                <mxCell id="sa_tokens" value="Modality tokens&#xa;[force, state, action, visual]&#xa;Tensor: [B,4,96]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=14;fontStyle=1" parent="sa1" vertex="1"><mxGeometry x="800" y="275" width="260" height="100" as="geometry"/></mxCell>
+                <mxCell id="sa_attn" value="1 layer Multi-Head Self-Attention&#xa;Q,K,V projections&#xa;4 heads × 24 dims&#xa;Attention matrix: [B,4,4,4]" style="swimlane;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;fontStyle=1" parent="sa1" vertex="1"><mxGeometry x="1130" y="180" width="380" height="270" as="geometry"/></mxCell>
+                <mxCell id="sa_attn_detail" value="每个样本动态计算&#xa;token-to-token attention&#xa;force ↔ state/action/visual" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;" parent="sa_attn" vertex="1"><mxGeometry x="25" y="80" width="330" height="90" as="geometry"/></mxCell>
+                <mxCell id="sa_norm" value="Residual + LayerNorm&#xa;FFN + Residual + LayerNorm" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;fontStyle=1" parent="sa1" vertex="1"><mxGeometry x="1580" y="260" width="280" height="110" as="geometry"/></mxCell>
+                <mxCell id="sa_pool" value="Mean pooling / action pooling&#xa;[B,4,96] → [B,96]&#xa;Linear → [B,80]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=13;fontStyle=1" parent="sa1" vertex="1"><mxGeometry x="1930" y="260" width="280" height="110" as="geometry"/></mxCell>
+                <mxCell id="sa_decoder" value="Existing Residual Decoder&#xa;Linear(80→48) → Linear(48→180)&#xa;Reshape → [B,30,6]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;fontStyle=1" parent="sa1" vertex="1"><mxGeometry x="2280" y="260" width="280" height="110" as="geometry"/></mxCell>
+                <mxCell id="sa_e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2;strokeColor=#82b366;" edge="1" parent="sa1" source="sa_input" target="sa_proj"><mxGeometry relative="1" as="geometry"/></mxCell>
+                <mxCell id="sa_e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2;strokeColor=#82b366;" edge="1" parent="sa1" source="sa_proj" target="sa_tokens"><mxGeometry relative="1" as="geometry"/></mxCell>
+                <mxCell id="sa_e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2;strokeColor=#82b366;" edge="1" parent="sa1" source="sa_tokens" target="sa_attn"><mxGeometry relative="1" as="geometry"/></mxCell>
+                <mxCell id="sa_e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2;strokeColor=#82b366;" edge="1" parent="sa1" source="sa_attn" target="sa_norm"><mxGeometry relative="1" as="geometry"/></mxCell>
+                <mxCell id="sa_e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2;strokeColor=#82b366;" edge="1" parent="sa1" source="sa_norm" target="sa_pool"><mxGeometry relative="1" as="geometry"/></mxCell>
+                <mxCell id="sa_e6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2;strokeColor=#b85450;" edge="1" parent="sa1" source="sa_pool" target="sa_decoder"><mxGeometry relative="1" as="geometry"/></mxCell>
+                <mxCell id="sa_note" value="可直接上传 attention matrix：每个 batch、每个 head、4×4 模态关系；权重随样本动态变化。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;align=left;" parent="sa1" vertex="1"><mxGeometry x="930" y="540" width="900" height="50" as="geometry"/></mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
 </mxfile>
