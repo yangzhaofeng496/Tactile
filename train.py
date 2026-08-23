@@ -241,6 +241,8 @@ def parse_args():
         action="store_true",
         help="Enable a per-horizon/per-axis affine calibration of ACT actions.",
     )
+    parser.add_argument("--action-calibrator-only", action="store_true")
+    parser.add_argument("--freeze-action-calibrator", action="store_true")
     return parser.parse_args()
 
 
@@ -1457,6 +1459,12 @@ def main():
         fusion_cfg["use_timestep_modality_gate"] = False
     if args.action_calibrator:
         model_config.setdefault("decoder", {})["use_action_calibrator"] = True
+    if args.action_calibrator_only:
+        decoder_cfg = model_config.setdefault("decoder", {})
+        decoder_cfg["use_action_calibrator"] = True
+        decoder_cfg["action_calibrator_only"] = True
+    if args.freeze_action_calibrator:
+        model_config.setdefault("decoder", {})["freeze_action_calibrator"] = True
 
     set_seed(int(dataloader_config["split"]["seed"]))
     device = resolve_device(training_cfg)

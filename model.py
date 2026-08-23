@@ -1302,11 +1302,16 @@ class TactileResidualACT(nn.Module):
                 validation_seed=int(decoder_cfg.get("diffusion_validation_seed", 1234)),
             )
         self.action_calibrator = None
+        self.action_calibrator_only = bool(decoder_cfg.get("action_calibrator_only", False))
+        self.freeze_action_calibrator = bool(decoder_cfg.get("freeze_action_calibrator", False))
         if bool(decoder_cfg.get("use_action_calibrator", False)):
             self.action_calibrator = ActionChunkAffineCalibrator(
                 horizon=self.action_horizon,
                 action_dim=self.action_dim,
             )
+            if self.freeze_action_calibrator:
+                for parameter in self.action_calibrator.parameters():
+                    parameter.requires_grad = False
 
 
     def forward(
@@ -1553,7 +1558,14 @@ class TactileResidualACT(nn.Module):
 
 
         diffusion_loss = None
-        if self.use_diffusion_residual:
+        calibrated_action = (
+            self.action_calibrator(act_chunk)
+            if self.action_calibrator is not None
+            else None
+        )
+        if self.action_calibrator_only:
+            delta_action = calibrated_action - act_chunk if self.action_calibrator is not None else torch.zeros_like(act_chunk)
+        elif self.use_diffusion_residual:
             if self.training and diffusion_target is not None:
                 delta_action, diffusion_loss, noise_loss, x0_loss = self.diffusion_decoder.training_step(
                     diffusion_target, z
@@ -1564,8 +1576,7 @@ class TactileResidualACT(nn.Module):
                 x0_loss = None
         else:
             delta_action = self.decoder(z)
-        if self.action_calibrator is not None:
-            calibrated_action = self.action_calibrator(act_chunk)
+        if self.action_calibrator is not None and not self.action_calibrator_only:
             delta_action = delta_action + calibrated_action - act_chunk
         if self.single_step_delta:
             delta_action = delta_action[:, 0, :]
