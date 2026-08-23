@@ -224,6 +224,11 @@ def parse_args():
         action="store_true",
         help="Enable the optional one-layer temporal Transformer decoder.",
     )
+    parser.add_argument(
+        "--residual-transformer",
+        action="store_true",
+        help="Use the token-based Residual Action Transformer fusion architecture.",
+    )
     return parser.parse_args()
 
 
@@ -1415,6 +1420,12 @@ def main():
         fusion_cfg["use_timestep_modality_gate"] = True
     if args.temporal_decoder:
         model_config.setdefault("decoder", {})["use_temporal_decoder"] = True
+    if args.residual_transformer:
+        fusion_cfg = model_config.setdefault("fusion", {})
+        fusion_cfg["type"] = "residual_transformer"
+        fusion_cfg["use_gate"] = False
+        fusion_cfg["use_modality_gate"] = False
+        fusion_cfg["use_timestep_modality_gate"] = False
 
     set_seed(int(dataloader_config["split"]["seed"]))
     device = resolve_device(training_cfg)

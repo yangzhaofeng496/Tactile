@@ -704,6 +704,66 @@ class TimestepModalityGate(nn.Module):
         return gated_context, weights
 
 
+class ResidualActionTransformerFusion(nn.Module):
+    """Token-based residual fusion with per-step action queries."""
+
+    def __init__(
+        self,
+        modality_dims,
+        action_dim,
+        action_horizon,
+        output_dim=80,
+        model_dim=128,
+        num_heads=4,
+        num_layers=2,
+        ffn_dim=256,
+        dropout=0.1,
+    ):
+        super().__init__()
+        if model_dim % num_heads != 0:
+            raise ValueError("residual transformer model_dim must be divisible by num_heads")
+        self.modality_dims = tuple(int(dim) for dim in modality_dims)
+        self.action_horizon = int(action_horizon)
+        self.projections = nn.ModuleList([
+            nn.Sequential(nn.Linear(dim, model_dim), nn.LayerNorm(model_dim))
+            for dim in self.modality_dims
+        ])
+        self.action_projection = nn.Sequential(
+            nn.Linear(int(action_dim), model_dim),
+            nn.LayerNorm(model_dim),
+        )
+        token_count = len(self.modality_dims) + self.action_horizon
+        self.token_embeddings = nn.Parameter(torch.zeros(1, token_count, model_dim))
+        layer = nn.TransformerEncoderLayer(
+            d_model=model_dim,
+            nhead=int(num_heads),
+            dim_feedforward=int(ffn_dim),
+            dropout=float(dropout),
+            activation="gelu",
+            batch_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(layer, num_layers=int(num_layers))
+        self.output = nn.Sequential(
+            nn.Linear(model_dim, output_dim),
+            nn.LayerNorm(output_dim),
+        )
+
+    def forward(self, modality_features, act_chunk, return_attention=False):
+        if len(modality_features) != len(self.projections):
+            raise ValueError("Residual transformer modality count mismatch")
+        modality_tokens = torch.stack(
+            [projection(feature) for projection, feature in zip(self.projections, modality_features)],
+            dim=1,
+        )
+        action_tokens = self.action_projection(act_chunk)
+        tokens = torch.cat([modality_tokens, action_tokens], dim=1)
+        tokens = self.encoder(tokens + self.token_embeddings)
+        action_context = self.output(tokens[:, len(self.modality_dims):])
+        if return_attention:
+            return action_context, {}
+        return action_context
+
+
 
 class TactileResidualACT(nn.Module):
 
@@ -963,6 +1023,7 @@ class TactileResidualACT(nn.Module):
             )
         fusion_output_dim = int(fusion_cfg.get("output_dim", 256))
         fusion_type = fusion_cfg.get("type", "mlp")
+        self.fusion_returns_sequence = fusion_type == "residual_transformer"
         fusion_cls = MultiHeadFusionEncoder if fusion_type == "multihead" else FusionEncoder
         fusion_kwargs = {
             "input_dim": fusion_input_dim,
@@ -995,7 +1056,29 @@ class TactileResidualACT(nn.Module):
                     fusion_cfg.get("modality_gate_residual_scale", 1.0)
                 ),
             )
-        if fusion_type == "self_attention":
+        if fusion_type == "residual_transformer":
+            transformer_modality_dims = []
+            if tactile_output_dim:
+                transformer_modality_dims.append(tactile_output_dim)
+            transformer_modality_dims += [
+                current_force_output_dim,
+                state_output_dim,
+                action_output_dim,
+            ]
+            if visual_output_dim:
+                transformer_modality_dims.append(visual_output_dim)
+            self.fusion = ResidualActionTransformerFusion(
+                modality_dims=transformer_modality_dims,
+                action_dim=self.action_dim,
+                action_horizon=self.action_horizon,
+                output_dim=fusion_output_dim,
+                model_dim=int(fusion_cfg.get("model_dim", 128)),
+                num_heads=int(fusion_cfg.get("num_heads", 4)),
+                num_layers=int(fusion_cfg.get("num_layers", 2)),
+                ffn_dim=int(fusion_cfg.get("ffn_dim", 256)),
+                dropout=float(fusion_cfg.get("dropout", 0.1)),
+            )
+        elif fusion_type == "self_attention":
             if tactile_output_dim:
                 raise ValueError("self_attention fusion currently expects tactile history to be disabled")
             self.fusion = ModalitySelfAttentionFusionEncoder(
@@ -1088,7 +1171,7 @@ class TactileResidualACT(nn.Module):
             hidden_dim=int(decoder_cfg.get("hidden_dim", 256)),
             action_horizon=1 if self.single_step_delta else self.action_horizon,
             action_dim=self.action_dim,
-            per_step=self.use_timestep_modality_gate,
+            per_step=(self.use_timestep_modality_gate or self.fusion_returns_sequence),
             temporal=bool(decoder_cfg.get("use_temporal_decoder", False)),
             temporal_num_heads=int(decoder_cfg.get("temporal_num_heads", 4)),
             temporal_ffn_dim=int(decoder_cfg.get("temporal_ffn_dim", 128)),
@@ -1200,7 +1283,7 @@ class TactileResidualACT(nn.Module):
 
 
         # Contributions live in the fusion hidden space, whose width is configurable.
-        is_token_fusion = isinstance(self.fusion, (MultiHeadFusionEncoder, ModalitySelfAttentionFusionEncoder, PairwiseCrossAttentionFusionEncoder))
+        is_token_fusion = isinstance(self.fusion, (MultiHeadFusionEncoder, ModalitySelfAttentionFusionEncoder, PairwiseCrossAttentionFusionEncoder, ResidualActionTransformerFusion))
         # Initialize contribution tensors for every fusion type.  The multihead
         # branch uses the concatenated input directly, so it previously skipped
         # the assignments below and failed when metrics were requested.
@@ -1219,6 +1302,22 @@ class TactileResidualACT(nn.Module):
         elif isinstance(self.fusion, PairwiseCrossAttentionFusionEncoder):
             fusion_result = self.fusion(
                 [current_force_feature, state_feature, action_feature, visual_feature],
+                return_attention=return_feature_metrics,
+            )
+        elif isinstance(self.fusion, ResidualActionTransformerFusion):
+            transformer_features = []
+            if tactile_feature is not None:
+                transformer_features.append(tactile_feature)
+            transformer_features += [
+                current_force_feature,
+                state_feature,
+                action_feature,
+            ]
+            if visual_feature is not None:
+                transformer_features.append(visual_feature)
+            fusion_result = self.fusion(
+                transformer_features,
+                act_chunk=act_chunk,
                 return_attention=return_feature_metrics,
             )
         else:
@@ -1314,7 +1413,12 @@ class TactileResidualACT(nn.Module):
             )
 
         if self.force_film_enabled:
-            z = self.force_film(z, current_force_feature)
+            force_condition = current_force_feature
+            if z.ndim == 3:
+                force_condition = force_condition.unsqueeze(1).expand(
+                    -1, z.shape[1], -1
+                )
+            z = self.force_film(z, force_condition)
 
 
         delta_action=self.decoder(z)
@@ -1351,6 +1455,8 @@ class TactileResidualACT(nn.Module):
                     "fusion_pair_attention_weights": fusion_attention["pair_attention_weights"],
                     "fusion_pair_weights": fusion_attention["pair_weights"],
                 }
+            elif isinstance(self.fusion, ResidualActionTransformerFusion):
+                feature_metrics = {}
             else:
                 feature_metrics = {}
             contribution_list = []
