@@ -61,7 +61,7 @@ state_encoder:
   hidden_dim: 32
   output_dim: 36
   normalize_input: true
-  stats_path: "/home/yang/TactileEncoder/dataloader/util/tactile_analysis/state_stats.json"
+  stats_path: "/home/yang/TactileEncoder/dataloader/util/tactile_analysis/state_stats_600_train.json"
   channel_order:
     - shoulder_pan.pos
     - shoulder_lift.pos
@@ -95,8 +95,8 @@ force_film:
 fusion:
   type: "multihead"
   use_gate: true             # 是否启用根据输入动态生成的 head gate；false 时使用静态 head 权重
-  use_modality_gate: true    # 是否根据输入动态调整各模态权重
-  use_timestep_modality_gate: false  # 实验二：是否为30个动作步分别生成模态权重
+  use_modality_gate: false   # 时间步门控实验中与 use_timestep_modality_gate 互斥
+  use_timestep_modality_gate: true  # 实验二：是否为30个动作步分别生成模态权重
   timestep_gate_temperature: 1.5
   timestep_gate_residual_scale: 0.5
   modality_gate_temperature: 1.5  # gate softmax 温度，越高越平滑
@@ -137,8 +137,8 @@ training:
   device: "cuda"
   validate_every: 1
   checkpoint_every: 10
-  checkpoint_dir: "/home/yang/TactileEncoder/residual_actmodel/experiments/400_50hil_820_multihead8_gate_balance_diversity"
-  wandb_name: "multihead8_gate_balance_diversity_seed11"
+  checkpoint_dir: "/home/yang/TactileEncoder/residual_actmodel/experiments/600_cache_timestep_modality_gate"
+  wandb_name: "600_cache_timestep_modality_gate_seed11"
   log_every: 10
   diagnostic_topk: 3
   diagnostic_val_batches: 1

@@ -6,7 +6,7 @@
 use_cache_loader: true
 
 dataset:
-  repo_id: "/home/yang/TactileEncoder/dataset/so101/450+150hil_821_ep340_606"
+  repo_id: "/home/yang/TactileEncoder/dataset/so101/450+150hil_821"
   root: null
   revision: null
   video_backend: "torchcodec"
@@ -78,7 +78,7 @@ split:
 loader:
   batch_size: 16
   window_stride: 1
-  train_window_fraction: 0.5  # 每个episode随机采样25%合法窗口，保持各组可比并缩短实验周期
+  train_window_fraction: 0.5  # 每个episode随机采样50%合法窗口，保持各组可比并缩短实验周期
   pair_adjacent_windows: false  # action consistency实验专用开关
   balance_current_force: false
   hard_replay_fraction: 0.0  # offline DAgger proxy开关，默认关闭

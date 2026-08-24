@@ -1,0 +1,31 @@
+{
+  "channel_names": [
+    "shoulder_pan.pos",
+    "shoulder_lift.pos",
+    "elbow_flex.pos",
+    "wrist_flex.pos",
+    "wrist_roll.pos",
+    "gripper.pos"
+  ],
+  "mean": [
+    -25.08447103889029,
+    -23.438236882775286,
+    47.72359126196263,
+    0.544226421162454,
+    -87.8103154413123,
+    18.440073932796082
+  ],
+  "std": [
+    2.0684862194649183,
+    27.90479448345601,
+    25.161655011280452,
+    33.41817362534221,
+    2.9229070623003053,
+    11.983373676988998
+  ],
+  "count": 330714,
+  "dataset_repo": "/home/yang/TactileEncoder/dataset/so101/450+150hil_821",
+  "cache": "outputs/act_cache/act_cache_600.pt",
+  "split_seed": 11,
+  "train_episode_count": 546
+}
