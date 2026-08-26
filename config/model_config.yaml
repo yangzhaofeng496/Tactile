@@ -61,7 +61,7 @@ state_encoder:
   hidden_dim: 32
   output_dim: 36
   normalize_input: true
-  stats_path: "/home/yang/TactileEncoder/dataloader/util/tactile_analysis/state_stats_600_train.json"
+  stats_path: "/home/yang/TactileEncoder/dataloader/util/tactile_analysis/state_stats.json"
   channel_order:
     - shoulder_pan.pos
     - shoulder_lift.pos
@@ -93,40 +93,19 @@ force_film:
 
 # 融合模块参数
 fusion:
-  type: "multihead"
-  use_gate: true             # 是否启用根据输入动态生成的 head gate；false 时使用静态 head 权重
-  use_modality_gate: false   # 时间步门控实验中与 use_timestep_modality_gate 互斥
-  use_timestep_modality_gate: true  # 实验二：是否为30个动作步分别生成模态权重
-  timestep_gate_temperature: 1.5
-  timestep_gate_residual_scale: 0.5
-  modality_gate_temperature: 1.5  # gate softmax 温度，越高越平滑
-  modality_gate_residual_scale: 0.5  # 残差式门控强度，避免模态被完全抑制
   input_dim: 216           # 36(current_force) + 36(state) + 72(action) + 72(visual)
   hidden_dim: 96
   output_dim: 80
-  num_heads: 8
-  dropout: 0.1
 
 # 残差解码器参数
 decoder:
   input_dim: 80
   hidden_dim: 48
-  use_temporal_decoder: false  # 可回溯开关：true时启用1层时间self-attention
-  temporal_num_heads: 4
-  temporal_ffn_dim: 128
-  # Residual Diffusion Transformer 可选参数（仅由 --residual-diffusion-transformer 启用）
-  diffusion_steps: 20
-  diffusion_model_dim: 128
-  diffusion_num_heads: 4
-  diffusion_num_layers: 2
-  diffusion_ffn_dim: 256
-  diffusion_x0_loss_weight: 0.1
-  diffusion_validation_seed: 1234
   output_dim: 180         # 30步 × 6轴delta
   action_horizon: 30
   action_dim: 6
-  single_step_delta: false
-  use_action_calibrator: false  # 可回溯：ACT时步/动作轴 affine systematic correction
+  # Executed actions are rounded to multiples of this unit; zero remains valid.
+  action_quantization_unit: 1.0
 
 # 训练参数
 training:
@@ -137,8 +116,8 @@ training:
   device: "cuda"
   validate_every: 1
   checkpoint_every: 10
-  checkpoint_dir: "/home/yang/TactileEncoder/residual_actmodel/experiments/600_cache_timestep_modality_gate"
-  wandb_name: "600_cache_timestep_modality_gate_seed11"
+  checkpoint_dir: "/home/yang/TactileEncoder/residual_actmodel/experiments/integer_action_unit1"
+  wandb_name: "integer_action_unit1"
   log_every: 10
   diagnostic_topk: 3
   diagnostic_val_batches: 1
@@ -160,6 +139,7 @@ training:
   current_force_noise_std: 0.05
   state_noise_std: 0.05
   temporal_smoothness_weight: 0.01
+  action_magnitude_weight: 0.05
   action_chunk_consistency_weight: 0.0
   head_gate_balance_weight: 0.001
   head_gate_diversity_weight: 0.001

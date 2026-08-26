@@ -5,6 +5,83 @@ import torch
 import torch.nn as nn
 
 
+class FzAwareTactileEncoder(nn.Module):
+    """Encode 12-D tactile history while preserving absolute Fz magnitude."""
+
+    def __init__(self, input_dim: int = 12, hidden_dim: int = 32,
+                 output_dim: int = 72, fz_feature_dim: int = 16,
+                 num_contact_classes: int = 4):
+        super().__init__()
+        if input_dim != 12:
+            raise ValueError("FzAwareTactileEncoder expects 12 channels.")
+        self.output_dim = output_dim + fz_feature_dim
+        self.fz_feature_dim = fz_feature_dim
+        self.temporal = nn.Sequential(
+            nn.Conv1d(input_dim, hidden_dim, 3, stride=2, padding=1),
+            nn.GELU(),
+            nn.Conv1d(hidden_dim, hidden_dim * 2, 3, stride=2, padding=1),
+            nn.GELU(),
+            nn.AdaptiveAvgPool1d(1),
+        )
+        self.main_projection = nn.Sequential(
+            nn.Linear(hidden_dim * 2, output_dim),
+            nn.LayerNorm(output_dim),
+            nn.GELU(),
+        )
+        self.fz_projection = nn.Sequential(
+            nn.Linear(4, 32), nn.SiLU(), nn.Linear(32, fz_feature_dim),
+            nn.LayerNorm(fz_feature_dim), nn.SiLU(),
+        )
+        self.contact_head = nn.Linear(fz_feature_dim, num_contact_classes)
+        self.fz_regression_head = nn.Linear(fz_feature_dim, 2)
+
+    @staticmethod
+    def make_fz_features(history):
+        left = history[..., 2].abs()
+        right = history[..., 8].abs()
+        return torch.stack((left, right, left + right, (left - right).abs()), dim=-1)
+
+    @staticmethod
+    def make_contact_labels(history, threshold):
+        fz = history[..., (2, 8)].abs().amax(dim=1)
+        if not torch.is_tensor(threshold):
+            threshold = torch.tensor(threshold, device=history.device, dtype=history.dtype)
+        left = fz[..., 0] > threshold
+        right = fz[..., 1] > threshold
+        return left.long() + 2 * right.long()
+
+    def forward(self, history):
+        if history.ndim != 3 or history.shape[-1] != 12:
+            raise ValueError(f"history must be [B,T,12], got {tuple(history.shape)}")
+        temporal_feature = self.temporal(history.transpose(1, 2)).squeeze(-1)
+        main_feature = self.main_projection(temporal_feature)
+        fz_sequence = self.make_fz_features(history)
+        fz_input = torch.stack((
+            fz_sequence[..., 0].mean(1), fz_sequence[..., 1].mean(1),
+            fz_sequence[..., 2].mean(1), fz_sequence[..., 3].mean(1),
+        ), dim=-1)
+        fz_feature = self.fz_projection(fz_input)
+        return {
+            "feature": torch.cat((main_feature, fz_feature), dim=-1),
+            "main_feature": main_feature,
+            "fz_feature": fz_feature,
+            "contact_logits": self.contact_head(fz_feature),
+            "fz_pred": self.fz_regression_head(fz_feature),
+            "fz_target": torch.stack((
+                history[..., 2].abs().mean(1), history[..., 8].abs().mean(1)
+            ), dim=-1),
+        }
+
+
+def fz_auxiliary_loss(output, history, contact_threshold,
+                      contact_weight=0.1, magnitude_weight=0.05):
+    labels = FzAwareTactileEncoder.make_contact_labels(history, contact_threshold)
+    contact_loss = nn.functional.cross_entropy(output["contact_logits"], labels)
+    magnitude_loss = nn.functional.smooth_l1_loss(output["fz_pred"], output["fz_target"])
+    return (contact_weight * contact_loss + magnitude_weight * magnitude_loss,
+            contact_loss, magnitude_loss)
+
+
 class TactileImageEncoder(nn.Module):
     """
     使用2D卷积处理触觉图像
@@ -830,7 +907,8 @@ class ResidualDiffusionDecoder(nn.Module):
     def __init__(self, context_dim=80, action_dim=6, horizon=30,
                  model_dim=128, num_heads=4, num_layers=2,
                  ffn_dim=256, diffusion_steps=20, dropout=0.1,
-                 x0_loss_weight=0.1, validation_seed=1234):
+                 x0_loss_weight=0.1, validation_seed=1234,
+                 residual_scale=0.1, residual_clip=0.2):
         super().__init__()
         if model_dim % num_heads != 0:
             raise ValueError("diffusion model_dim must be divisible by num_heads")
@@ -839,7 +917,10 @@ class ResidualDiffusionDecoder(nn.Module):
         self.diffusion_steps = int(diffusion_steps)
         self.x0_loss_weight = float(x0_loss_weight)
         self.validation_seed = int(validation_seed)
+        self.residual_scale = float(residual_scale)
+        self.residual_clip = float(residual_clip)
         self.action_projection = nn.Linear(self.action_dim, model_dim)
+        self.base_action_projection = nn.Linear(self.action_dim, model_dim)
         self.context_projection = nn.Linear(context_dim, model_dim)
         self.time_embedding = nn.Sequential(
             nn.Linear(1, model_dim), nn.GELU(), nn.Linear(model_dim, model_dim)
@@ -859,13 +940,20 @@ class ResidualDiffusionDecoder(nn.Module):
         self.register_buffer("betas", betas)
         self.register_buffer("alphas_cumprod", torch.cumprod(alphas, dim=0))
 
-    def predict_noise(self, noisy_action, timestep, context):
+    def predict_noise(self, noisy_action, timestep, context, act_chunk):
         t = timestep.to(context.dtype).view(-1, 1, 1) / max(self.diffusion_steps - 1, 1)
-        h = self.action_projection(noisy_action) + self.context_projection(context)
+        context_features = self.context_projection(context)
+        if context_features.ndim == 2:
+            context_features = context_features.unsqueeze(1)
+        h = (
+            self.action_projection(noisy_action)
+            + self.base_action_projection(act_chunk)
+            + context_features
+        )
         h = h + self.time_embedding(t).expand(-1, self.horizon, -1) + self.position
         return self.output(self.transformer(h))
 
-    def training_step(self, target, context):
+    def training_step(self, target, context, act_chunk):
         batch = target.shape[0]
         timestep = torch.randint(
             0, self.diffusion_steps, (batch,), device=target.device
@@ -873,7 +961,7 @@ class ResidualDiffusionDecoder(nn.Module):
         noise = torch.randn_like(target)
         alpha_bar = self.alphas_cumprod[timestep].view(-1, 1, 1)
         noisy = alpha_bar.sqrt() * target + (1.0 - alpha_bar).sqrt() * noise
-        predicted_noise = self.predict_noise(noisy, timestep, context)
+        predicted_noise = self.predict_noise(noisy, timestep, context, act_chunk)
         diffusion_loss = torch.nn.functional.mse_loss(predicted_noise, noise)
         x0 = (noisy - (1.0 - alpha_bar).sqrt() * predicted_noise) / alpha_bar.sqrt()
         x0_loss = torch.nn.functional.mse_loss(x0, target)
@@ -881,7 +969,7 @@ class ResidualDiffusionDecoder(nn.Module):
         return x0, loss, diffusion_loss, x0_loss
 
     @torch.no_grad()
-    def sample(self, context):
+    def sample(self, context, act_chunk):
         generator = torch.Generator(device="cpu")
         generator.manual_seed(self.validation_seed)
         x = torch.randn(
@@ -893,7 +981,7 @@ class ResidualDiffusionDecoder(nn.Module):
             timestep = torch.full(
                 (context.shape[0],), step, device=context.device, dtype=torch.long
             )
-            predicted_noise = self.predict_noise(x, timestep, context)
+            predicted_noise = self.predict_noise(x, timestep, context, act_chunk)
             alpha_t = alphas[step]
             alpha_bar_t = self.alphas_cumprod[step]
             alpha_bar_prev = (
@@ -916,6 +1004,10 @@ class ResidualDiffusionDecoder(nn.Module):
             else:
                 x = x0
         return x
+
+    def apply_residual(self, act_chunk, residual):
+        bounded = residual.clamp(-self.residual_clip, self.residual_clip)
+        return act_chunk + self.residual_scale * bounded
 
 
 class ActionChunkAffineCalibrator(nn.Module):
@@ -1026,6 +1118,22 @@ class TactileResidualACT(nn.Module):
                 raise ValueError(f"Unknown tactile_encoder_type: {tactile_encoder_type}. Choose 'force', 'image', or 'vqvae'.")
 
         self.tactile_encoder_type = tactile_encoder_type
+        fz_cfg = tactile_encoder_cfg.get("fz_auxiliary", {})
+        self.fz_auxiliary_enabled = bool(fz_cfg.get("enabled", False)) and self.use_tactile_history and tactile_encoder_type == "force"
+        self.fz_auxiliary = None
+        if self.fz_auxiliary_enabled:
+            self.fz_contact_threshold = float(fz_cfg.get("contact_threshold", 1.0))
+            self.fz_auxiliary_loss_weight = float(fz_cfg.get("contact_loss_weight", 0.1))
+            self.fz_magnitude_loss_weight = float(fz_cfg.get("magnitude_loss_weight", 0.05))
+            self.fz_auxiliary = FzAwareTactileEncoder(
+                input_dim=tactile_input_dim,
+                hidden_dim=int(fz_cfg.get("hidden_dim", 32)),
+                # The standalone encoder requires a non-empty main branch;
+                # this integration uses only its dedicated fz_feature.
+                output_dim=1,
+                fz_feature_dim=int(fz_cfg.get("feature_dim", 16)),
+            )
+            tactile_output_dim += int(fz_cfg.get("feature_dim", 16))
         self.normalize_tactile_input = bool(normalize_tactile_input)
         mean = torch.as_tensor(
             tactile_channel_mean if tactile_channel_mean is not None else [],
@@ -1130,6 +1238,11 @@ class TactileResidualACT(nn.Module):
 
         self.action_horizon = int(action_horizon)
         self.action_dim = int(action_dim)
+        self.action_quantization_unit = float(
+            decoder_cfg.get("action_quantization_unit", 1.0)
+        )
+        if self.action_quantization_unit <= 0:
+            raise ValueError("action_quantization_unit must be positive")
 
         expected_action_input_dim = (
             self.action_horizon * self.action_dim
@@ -1374,6 +1487,8 @@ class TactileResidualACT(nn.Module):
                 dropout=float(decoder_cfg.get("dropout", 0.1)),
                 x0_loss_weight=float(decoder_cfg.get("diffusion_x0_loss_weight", 0.1)),
                 validation_seed=int(decoder_cfg.get("diffusion_validation_seed", 1234)),
+                residual_scale=float(decoder_cfg.get("diffusion_residual_scale", 0.1)),
+                residual_clip=float(decoder_cfg.get("diffusion_residual_clip", 0.2)),
             )
         self.action_calibrator = None
         self.action_calibrator_only = bool(decoder_cfg.get("action_calibrator_only", False))
@@ -1403,6 +1518,7 @@ class TactileResidualACT(nn.Module):
         tactile_feature = None
 
         if self.use_tactile_history:
+            raw_tactile_history = tactile_history
             if self.normalize_tactile_input:
                 if self.tactile_encoder_type == "force" or self.tactile_encoder_type == "vqvae":
                     expected_channels = self.tactile_channel_mean.numel()
@@ -1432,6 +1548,15 @@ class TactileResidualACT(nn.Module):
                 tactile_feature, vqvae_token_id = self.tactile_encoder(tactile_history, return_token_id=True)
             else:
                 tactile_feature = self.tactile_encoder(tactile_history)
+            if self.fz_auxiliary_enabled:
+                fz_output = self.fz_auxiliary(raw_tactile_history)
+                tactile_feature = torch.cat(
+                    [tactile_feature, fz_output["fz_feature"]], dim=-1
+                )
+            else:
+                fz_output = None
+        else:
+            fz_output = None
 
         # 处理当前力数据
         if self.normalize_current_force_input:
@@ -1642,16 +1767,19 @@ class TactileResidualACT(nn.Module):
         elif self.use_diffusion_residual:
             if self.training and diffusion_target is not None:
                 delta_action, diffusion_loss, noise_loss, x0_loss = self.diffusion_decoder.training_step(
-                    diffusion_target, z
+                    diffusion_target, z, act_chunk
                 )
             else:
-                delta_action = self.diffusion_decoder.sample(z)
+                delta_action = self.diffusion_decoder.sample(z, act_chunk)
+                delta_action = self.diffusion_decoder.apply_residual(act_chunk, delta_action) - act_chunk
                 noise_loss = None
                 x0_loss = None
         else:
             delta_action = self.decoder(z)
         if self.action_calibrator is not None and not self.action_calibrator_only:
             delta_action = delta_action + calibrated_action - act_chunk
+        # Quantize the executed absolute action while preserving gradients during training.
+        delta_action = self.quantize_action(act_chunk + delta_action) - act_chunk
         if self.single_step_delta:
             delta_action = delta_action[:, 0, :]
 
@@ -1742,9 +1870,21 @@ class TactileResidualACT(nn.Module):
             # VQ-VAE模式下添加token ID
             if vqvae_token_id is not None:
                 feature_metrics["vqvae_token_id"] = vqvae_token_id
+            if fz_output is not None:
+                feature_metrics["fz_contact_logits"] = fz_output["contact_logits"]
+                feature_metrics["fz_pred"] = fz_output["fz_pred"]
+                feature_metrics["fz_target"] = fz_output["fz_target"]
             return delta_action, feature_metrics
 
         return delta_action
+
+    def quantize_action(self, action):
+        """Return actions on the configured grid, preserving STE gradients in training."""
+        unit = self.action_quantization_unit
+        quantized = torch.round(action / unit) * unit
+        if self.training:
+            return action + (quantized - action).detach()
+        return quantized
 
 
 

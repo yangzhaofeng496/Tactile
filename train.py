@@ -28,6 +28,7 @@ from model import (
     compute_target_delta,
     residual_loss,
 )
+from model import FzAwareTactileEncoder
 
 
 def safe_wandb_log(payload):
@@ -953,6 +954,7 @@ def compute_losses(
     criterion,
     batch,
     reference_dropout=0.5,
+    action_magnitude_weight=0.0,
 ):
     tactile_history = batch.get("tactile_history")
     current_force = batch["current_force"]
@@ -991,9 +993,41 @@ def compute_losses(
         metrics["diffusion_x0_loss"] = feature_metrics["diffusion_x0_loss"].detach()
         if model.training:
             objective_loss = feature_metrics["diffusion_loss"]
+    if "fz_contact_logits" in feature_metrics and tactile_history is not None:
+        labels = FzAwareTactileEncoder.make_contact_labels(
+            tactile_history,
+            model.fz_contact_threshold,
+        )
+        contact_loss = torch.nn.functional.cross_entropy(
+            feature_metrics["fz_contact_logits"], labels
+        )
+        fz_loss = torch.nn.functional.smooth_l1_loss(
+            feature_metrics["fz_pred"], feature_metrics["fz_target"]
+        )
+        fz_weight = float(getattr(model, "fz_auxiliary_loss_weight", 0.1))
+        fz_magnitude_weight = float(getattr(model, "fz_magnitude_loss_weight", 0.05))
+        metrics["fz_contact_loss"] = contact_loss.detach()
+        metrics["fz_magnitude_loss"] = fz_loss.detach()
+        objective_loss = objective_loss + fz_weight * contact_loss + fz_magnitude_weight * fz_loss
     if not model.training and "final_action_mse" in metrics:
         # All variants select checkpoints by absolute-action MSE.
         objective_loss = metrics["final_action_mse"]
+
+    # Keep the residual objective, but also match the magnitude of the final
+    # commanded action. This discourages the residual branch from collapsing
+    # to near-zero corrections when the base ACT chunk is imperfect.
+    if action_magnitude_weight > 0.0:
+        predicted_action = act_chunk + pred_delta
+        target_action = expert_action
+        if predicted_action.ndim == 2:
+            target_action = target_action[:, 0, :]
+            target_action = target_action.to(predicted_action.dtype)
+        magnitude_loss = torch.nn.functional.smooth_l1_loss(
+            predicted_action.norm(dim=-1),
+            target_action.norm(dim=-1),
+        )
+        metrics["action_magnitude_loss"] = magnitude_loss.detach()
+        objective_loss = objective_loss + action_magnitude_weight * magnitude_loss
 
     return objective_loss, metrics, pred_delta, target_delta
 
@@ -1094,6 +1128,7 @@ def train_one_epoch(
     head_gate_diversity_weight=0.0,
     modality_dropout_prob=0.0,
     ablate_modalities=None,
+    action_magnitude_weight=0.0,
 ):
     model.train()
     metric_accumulator = init_metric_accumulator()
@@ -1155,6 +1190,7 @@ def train_one_epoch(
                     model=model,
                     criterion=criterion,
                     batch=batch,
+                    action_magnitude_weight=action_magnitude_weight,
                 )
                 if (
                     head_gate_balance_weight > 0.0
@@ -1248,6 +1284,7 @@ def validate(
     update_weights=False,
     reference_dropout=0.5,
     ablate_modalities=None,
+    action_magnitude_weight=0.0,
 ):
     if update_weights and (optimizer is None or scaler is None):
         raise ValueError(
@@ -1279,6 +1316,7 @@ def validate(
                     model=model,
                     criterion=criterion,
                     batch=batch,
+                    action_magnitude_weight=action_magnitude_weight,
                 )
             if update_weights:
                 scaler.scale(objective_loss).backward()
@@ -1815,6 +1853,9 @@ def main():
     temporal_smoothness_weight = float(
         training_cfg.get("temporal_smoothness_weight", 0.0)
     )
+    action_magnitude_weight = float(
+        training_cfg.get("action_magnitude_weight", 0.0)
+    )
     action_chunk_consistency_weight = float(
         training_cfg.get("action_chunk_consistency_weight", 0.0)
     )
@@ -1881,6 +1922,7 @@ def main():
             current_force_gain_range=current_force_gain_range,
             state_noise_std=state_noise_std,
             temporal_smoothness_weight=temporal_smoothness_weight,
+            action_magnitude_weight=action_magnitude_weight,
             action_chunk_consistency_weight=action_chunk_consistency_weight,
             head_gate_balance_weight=head_gate_balance_weight,
             head_gate_diversity_weight=head_gate_diversity_weight,
@@ -1905,6 +1947,7 @@ def main():
                 update_weights=False,
                 reference_dropout=reference_dropout,
                 ablate_modalities=ablate_modalities,
+                action_magnitude_weight=action_magnitude_weight,
             )
             val_loss = float(val_metrics.get("objective_loss", 0.0))
             safe_wandb_log(
@@ -1931,6 +1974,7 @@ def main():
                     ),
                     desc="Test",
                     ablate_modalities=ablate_modalities,
+                    action_magnitude_weight=action_magnitude_weight,
                 )
                 test_loss = float(test_metrics.get("objective_loss", 0.0))
                 safe_wandb_log(
